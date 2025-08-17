@@ -1,0 +1,55 @@
+[build-system]
+requires      = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yacce"
+version = "0.0.1"
+description = "Non-intrusive bazel compile_commands.json extractor"
+readme = "README.md"
+authors = [{ name = "Aleksei Rechinskii", email = "5dpea9nhd@mozmail.com" }]
+license = "MIT"
+license-files = ["LICEN[CS]E*"]
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Topic :: Software Development",
+    "Topic :: Utilities",
+]
+keywords = ["bazel","compile_commands.json", "extractor"]
+dependencies = [
+    "rich",
+]
+requires-python = ">=3.10"
+# due to using | in type hinting.
+
+[project.urls]
+Homepage = "https://github.com/Arech/yacce"
+
+[project.scripts]
+yacce = "yacce.__main__:main"
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+
+[tool.ruff]
+preview = true
+exclude = [
+    ".git",
+    "build",
+    "__pycache__",
+]
+line-length = 100
+indent-width = 4
+target-version = "py311"
+
+[tool.ruff.format]
+docstring-code-format = true
+docstring-code-line-length = 70
+line-ending = "lf"
