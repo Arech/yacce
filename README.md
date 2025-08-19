@@ -1,4 +1,2 @@
-# Non-intrusive bazel compile_commands.json extractor, yacce (experiment)
-
-
+# Yacce is a non-intrusive compile_commands.json extractor for Bazel (experimental)
 

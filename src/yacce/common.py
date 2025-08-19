@@ -69,7 +69,7 @@ class LoggingConsole(rich.console.Console):
         return self._do_log("magenta", "CRIT", *args, **kwargs)
     
     def yacce_begin(self):
-        super().print("[bold bright_blue]======== YACCE >>>>>>>>[/bold bright_blue]")
+        super().print("[bold bright_blue]==== YACCE >>>>>>>>[/bold bright_blue]")
 
     def yacce_end(self):
-        super().print("[bold bright_blue]<<<<<<<< YACCE ========[/bold bright_blue]")
+        super().print("[bold bright_blue]<<<<<<<< YACCE ====[/bold bright_blue]")

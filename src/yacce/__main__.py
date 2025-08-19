@@ -2,13 +2,24 @@ import argparse
 import sys
 
 from yacce import common
+from yacce.mod_bazel import mode_bazel
+from yacce.mod_from_log import mode_from_log
 
 
 # default mode is the first
 kModes = {
-    "bazel": "Run a given build system based on Bazel and make compile_commands.json from it.",
-    "from_log": "Generate compile_commands.json from strace log file.",
+    "bazel": "Run a given build system based on Bazel and extract compile_commands.json from it (possibly "
+    "with individual auxiliary compile_commands.json for each dependency). This is the default mode ",
+    "from_log": "[dbg] Generate a possibly NON-WORKING(!) compile_commands.json from a strace log file. "
+    "This mode features the most generic way to parse strace output and since the log generally "
+    "lacks some important information (such as the working directory in case of Bazel, "
+    "which substitutes PWD with a useless /proc/self/cwd), it may produce a non-working "
+    "compile_commands.json. This mode is primarily intended for debugging purposes as it doesn't "
+    "use any assumptions about the build system and just parses the strace log file and turns it "
+    "into compile_commands.json as is.",
 }
+
+kModeFuncs = {"bazel": mode_bazel, "from_log": mode_from_log}
 
 
 def getModeArgs():
@@ -24,10 +35,13 @@ def getModeArgs():
     # unfortunately, for some unexplained and dumb reason, argparse doesn't support parsing known
     # arguments only up to the first unknown argument, so we have to manually control for that.
     parser = argparse.ArgumentParser(
+        prog="yacce",
         description=common.kMainDescription,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
+    # dumb, but argparse doesn't have a way to query for defined flags
+    definedFlags = {"--debug"}
     parser.add_argument(
         "--debug",
         help="Minimum debug level to show. 0 is the most verbose. Default: %(default)s",
@@ -36,6 +50,7 @@ def getModeArgs():
         default=common.LoggingConsole.LogLevel.Info.value,
     )
 
+    definedFlags |= {"--colors", "--no-colors"}
     parser.add_argument(
         "--colors",
         help="Controls if the output could be colored. Default: %(default)s",
@@ -43,42 +58,46 @@ def getModeArgs():
         default=True,
     )
 
-    modes = parser.add_subparsers(help='Modes of operation. Use "help" for more info.')
+    modes = parser.add_subparsers(
+        help='Modes of operation. Use "--help" with each to get more info.'
+    )
 
     for mode, description in kModes.items():
         p = modes.add_parser(mode, help=description)
         p.add_argument("--mode", dest="mode", default=mode, help=argparse.SUPPRESS)
 
-    if len(sys.argv) <= 2:
+    if len(sys.argv) <= 2:  # there's always more than 1 arg
         parser.print_help()
         sys.exit(2)
 
-    idx = 0
-    for idx, arg in enumerate(sys.argv[1:]):
-        if not arg.startswith("--") and arg not in kModes and not arg.isdigit():
+    not_found = 1
+    for first_rest, arg in enumerate(sys.argv[1:]):
+        if arg not in definedFlags and arg not in kModes and not arg.isdigit():
+            not_found = 0
             break
-
-    if idx == len(sys.argv) - 1:
+    first_rest += 1 + not_found
+    if first_rest >= len(sys.argv):  # mode specific args always exist
         parser.print_help()
         sys.exit(2)
 
-    return parser.parse_args(sys.argv[1 : idx + 1]), sys.argv[idx + 1 :]
+    return parser.parse_args(sys.argv[1:first_rest]), sys.argv[first_rest:]
 
 
 def main():
     args, unparsed_args = getModeArgs()
     Con = common.LoggingConsole(
-        no_color=not args.colors,
-        log_level= common.LoggingConsole.LogLevel(args.debug)
+        no_color=not args.colors, log_level=common.LoggingConsole.LogLevel(args.debug)
     )
     Con.yacce_begin()
 
     Con.debug("mode args:", args)
-    Con.debug("args beyond mode:", unparsed_args)
+    Con.debug("args past the mode:", unparsed_args)
 
     if not hasattr(args, "mode"):
         Con.debug("Mode is not specified, using the default")
     mode = args.mode if hasattr(args, "mode") else next(iter(kModes))
+
+    kModeFuncs[mode](Con, args, unparsed_args)
 
 
 if __name__ == "__main__":
