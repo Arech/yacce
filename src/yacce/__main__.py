@@ -97,7 +97,7 @@ def main():
         Con.debug("Mode is not specified, using the default")
     mode = args.mode if hasattr(args, "mode") else next(iter(kModes))
 
-    kModeFuncs[mode](Con, args, unparsed_args)
+    sys,exit(kModeFuncs[mode](Con, args, unparsed_args))
 
 
 if __name__ == "__main__":
