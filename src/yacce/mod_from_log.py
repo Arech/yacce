@@ -11,28 +11,40 @@ from .common import (
 )
 
 
+# def storeJson(commands:list[tuple[float, str]], cwd:str) -> int:
+
+
+def rawPathExists(cwd: str, path: str) -> bool:
+    path = path.encode("latin1").decode("unicode_escape")
+    if not os.path.isabs(path):
+        path = os.path.join(cwd, path)
+    return os.path.exists(path)
+
+
 def parseLog(
     Con: LoggingConsole,
     log_file: str,
-    cdw: str,
+    cwd: str,
     do_test_files: bool,
     compilers: CompilersTuple,
-    do_linking: bool,
+    do_link: bool,
 ) -> int:
     Con.debug(
-        f"Parsing log file: {log_file}, assuming directory: {cdw}, test_files={do_test_files}, compilers={compilers}"
+        f"Parsing log file: {log_file}, assuming directory: {cwd}, test_files={do_test_files}, compilers={compilers}"
     )
 
-    running_pids = {}  # int(pid) -> tuple(start_ts: float, args: str, line_idx: int, is_linking: bool)
+    running_pids = {}  # int(pid) -> tuple(start_ts: float, line_idx: int, is_link: bool, cmd_idx:int)
     compile_commands = []  # list to be later written to compile_commands.json
-    linking_commands = []
+    compile_cmd_time=[]
+    link_commands = []
+    link_cmd_time=[]
     # errors = {} # error_code -> array of line_idx where it happened
 
     def handleExit(pid: int, ts: float, exit_code: str | None, line_idx: int) -> None:
         # negative exit code means the process termination was not found in the log
-        nonlocal running_pids, compile_commands, Con
+        nonlocal running_pids, compile_cmd_time, link_cmd_time, Con
 
-        (start_ts, args, start_line_idx, is_linking) = running_pids[pid]
+        (start_ts, start_line_idx, is_link, cmd_idx) = running_pids[pid]
 
         is_exit_logged = line_idx > 0
         if is_exit_logged:  # <=0 line_idx is used when we didn't find the process exit in the log
@@ -65,16 +77,21 @@ def parseLog(
             )
 
         duration = ts - start_ts if is_exit_logged else 0.0
-        (linking_commands if is_linking else compile_commands).append((duration, args))
+        if is_link:
+            link_cmd_time[cmd_idx] = duration
+        else:
+            compile_cmd_time[cmd_idx] = duration
+
         del running_pids[pid]
 
     # greedy match repeatedly blocks ending on escaped quote \" literal, or that doesn't contain
     # quotes at all until first unescaped quote
     rInQuotes = re.compile(r"\"((?:[^\"]*\\\"|[^\"]*)*)\"")
-    rInBraces = re.compile(r"\[((?:[^\[]*\\\[|[^\[]*)*)\]")
+    # greedy match [] with any chars inside of ""
+    rInBraces = re.compile(r"^\[(?:(?:[, ])*\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")*\]")
 
     def handleExec(call: str, pid: int, ts: float, line_idx: int, line: str) -> None:
-        nonlocal running_pids, Con
+        nonlocal running_pids, Con, link_commands, compile_commands, compile_cmd_time, link_cmd_time
         assert pid not in running_pids  # should be checked by the caller
         """assert call in ("execve", "execveat"), (
             f"Line {line_idx}: pid {pid} made call {call}. The code is inconsistent "
@@ -112,24 +129,113 @@ def parseLog(
         assert line[match_filepath.end() + 1 : args_start_pos + 1].startswith(", ["), (
             f"Unexpected format of the {call} syscall in the log file"
         )
+        # we can't simply search for the closing ] because there might be braces in file names and
+        # they don't have to be shell-escaped
         match_args = rInBraces.match(line[args_start_pos:])
         assert match_args, (
             f"Line {line_idx}: pid {pid} made call {call} but the arguments array couldn't be parsed. "
-            "This might mean the log file is malformed or the regexp is incorrect"
+            "This might mean the log file is malformed or rInBraces regexp is incorrect"
         )
-        # TODO: fix rInBraces. A bracket in a filepath doesn't need to be escaped, so the regexp will fail
-        args_str = match_args.group(1)
+
+        args_str = match_args.group()
 
         # checking if it's a linking command (heuristic: if it contains -o and no -c)
-        is_linking = True
+        has_output = ' "-o"' in args_str
+        if not has_output:
+            Con.error(
+                f"Line {line_idx}: pid {pid} made call {call} which doesn't contain an output file (-o). "
+                "Don't know what to do with it, ignoring. Full command args are: {args_str}"
+            )
+            return
+        is_compile = ' "-c"' in args_str
+        is_link = not is_compile
 
-        if not do_linking and is_linking:
+        if not do_link and is_link:
             return  # not interested in linking commands
+
+        # Extracting args from the args_str. We can't simply split by ", " because there might be
+        # such sequence in file names. So we use the same rInQuotes regexp to extract them one by one.
+        # In a sense, it's a duplication of application of the same regexp as above, but we must
+        # scope the search to the inside of the braces only
+        args = re.findall(rInQuotes, args_str)
+
+        # now walking over the args and checking existence of those that we know to be files or dirs.
+        # Also getting arguments of -o and -c options, if they are present
+        next_is_path = False
+        next_is_output = False
+        next_is_compile = False
+        arg_compile = None
+        arg_output = None
+        for arg in args:
+            if next_is_path:
+                next_is_path = False
+                if do_test_files and not rawPathExists(cwd, arg):
+                    Con.warning(
+                        f"Line {line_idx}: pid {pid} made call {call} with argument '{arg}' "
+                        "which doesn't exist. This might mean the build system is misconfigured "
+                        "or the log file is incomplete and hence so is the resulting compile_commands.json. "
+                        f"Full command args are: {args_str}"
+                    )
+                if next_is_compile:
+                    next_is_compile = False
+                    if arg_compile is not None:
+                        Con.warning(
+                            f"Line {line_idx}: pid {pid} made call {call} with multiple -c options. "
+                            f"This is unusual, taking the last one. Full command args are: {args_str}"
+                        )
+                    arg_compile = arg  # it's already escaped
+                if next_is_output:
+                    next_is_output = False
+                    if arg_output is not None:
+                        Con.warning(
+                            f"Line {line_idx}: pid {pid} made call {call} with multiple -o options. "
+                            f"This is unusual, taking the last one. Full command args are: {args_str}"
+                        )
+                    arg_output = arg  # it's already escaped
+            elif arg == "-o":
+                next_is_path = True
+                next_is_output = True
+            elif arg == "-c":
+                next_is_path = True
+                next_is_compile = True
+            elif arg in (
+                "-I",
+                "--include-directory",
+                "-isystem",
+                "-iquote",
+                "-isysroot",
+                "--sysroot",
+                "-cxx-isystem", #TODO proper list + parsing combined args like --sysroot=/path
+            ):
+                next_is_path = True
+            """elif do_test_files and arg.startswith((
+                "-I",
+                "--include-directory=",
+                "-isystem",
+                "-iquote",
+                "-isysroot",
+                "--sysroot=",
+                "-cxx-isystem"
+            )):
+                # TODO
+                pass"""
+            
+        assert arg_output is not None
+        assert is_link or arg_compile is not None
 
         # TODO: do we need to fix the first argument in args to be the same as the one used in
         # execve()? It might be different depending how execve() was called.
 
-        running_pids[pid] = (ts, line.strip(), line_idx, is_linking)
+        if is_link:
+            link_commands.append((args_str, arg_output))
+            cmd_idx = len(link_cmd_time)
+            link_cmd_time.append(0.0)
+        else:
+            compile_commands.append((args_str, arg_output, arg_compile))
+            cmd_idx = len(compile_cmd_time)
+            compile_cmd_time.append(0.0)
+
+        running_pids[pid] = (ts, line_idx, is_link, cmd_idx)
 
     # match the start of the log string: (<pid>) (<time.stamp>) (execve|execveat|exited...)
     rExecOrExit = re.compile(
@@ -163,7 +269,7 @@ def parseLog(
 
     assert 0 == len(running_pids)
     Con.print("compile_commands = ", compile_commands)
-    Con.print("linking_commands = ", linking_commands)
+    Con.print("link_commands = ", link_commands)
     return 0
 
 
@@ -192,5 +298,5 @@ def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: 
         args.cwd,
         not args.ignore_not_found,
         args.compiler,
-        args.linking_commands,
+        args.link_commands,
     )

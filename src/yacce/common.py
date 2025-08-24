@@ -101,8 +101,8 @@ def addCommonCliArgs(parser: argparse.ArgumentParser):
 
     parser.add_argument(
         "-l",
-        "--linking_commands",
-        help="If set, will also generate linking_commands.json (in a similar format to "
+        "--link_commands",
+        help="If set, will also generate link_commands.json (in a similar format to "
         "compile_commands, but for linking. Useful to get some insights). Default: %(default)s",
         action=argparse.BooleanOptionalAction,
         default=False,
