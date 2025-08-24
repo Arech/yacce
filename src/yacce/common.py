@@ -116,6 +116,13 @@ def addCommonCliArgs(parser: argparse.ArgumentParser):
         nargs="*",
     )
 
+    parser.add_argument(
+        "-d",
+        "--dest_dir",
+        help="Destination directory into which to create compile_commands.json. Default: current working directory.",
+        type=str,
+    )
+
     return parser
 
 
@@ -161,12 +168,13 @@ def makeCompilersSet(custom_compilers: list[str] | None) -> CompilersTuple:
     assert all(isinstance(c, str) for c in custom_compilers)
 
     kGccVers = (9, 18)
+    kGccPfxs = ("","x86_64-linux-gnu-")
     kClangVers = (10, 25)
 
     basenames = frozenset(
         ["cc", "c++", "gcc", "g++", "clang", "clang++"]
-        + [f"gcc-{v}" for v in range(*kGccVers)]
-        + [f"g++-{v}" for v in range(*kGccVers)]
+        + [f"{pfx}gcc-{v}" for v in range(*kGccVers) for pfx in kGccPfxs]
+        + [f"{pfx}g++-{v}" for v in range(*kGccVers) for pfx in kGccPfxs]
         + [f"clang-{v}" for v in range(*kClangVers)]
         + [f"clang++-{v}" for v in range(*kClangVers)]
         + [c for c in custom_compilers if c and not c.startswith("/")]

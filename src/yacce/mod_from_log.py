@@ -11,7 +11,27 @@ from .common import (
 )
 
 
-# def storeJson(commands:list[tuple[float, str]], cwd:str) -> int:
+def storeJson(
+    filename: str, commands: list[tuple], cmd_times: list[float], cwd: str, is_link: bool
+):
+    cwd = cwd.replace('"','\"')
+    with open(filename, "w") as f:
+        f.write("[\n")
+        for idx,cmd_tuple in enumerate(commands):
+            f.write("{\n")
+            f.write(f" \"directory\": \"{cwd}\",\n")
+            if is_link:
+                args_str, arg_output = cmd_tuple
+            else:
+                args_str, arg_output, arg_compile = cmd_tuple
+                f.write(f" \"file\": \"{arg_compile}\",\n")
+
+            f.write(f" \"arguments\": {args_str},\n")
+            f.write(f" \"output\": \"{arg_output}\",\n")
+            f.write(f" \"duration_s\": {cmd_times[idx]:.6f}\n")
+            f.write("}\n")
+
+        f.write("]\n")
 
 
 def rawPathExists(cwd: str, path: str) -> bool:
@@ -28,16 +48,16 @@ def parseLog(
     do_test_files: bool,
     compilers: CompilersTuple,
     do_link: bool,
-) -> int:
+) -> tuple[list, list, list, list]:
     Con.debug(
         f"Parsing log file: {log_file}, assuming directory: {cwd}, test_files={do_test_files}, compilers={compilers}"
     )
 
     running_pids = {}  # int(pid) -> tuple(start_ts: float, line_idx: int, is_link: bool, cmd_idx:int)
     compile_commands = []  # list to be later written to compile_commands.json
-    compile_cmd_time=[]
+    compile_cmd_time = []
     link_commands = []
-    link_cmd_time=[]
+    link_cmd_time = []
     # errors = {} # error_code -> array of line_idx where it happened
 
     def handleExit(pid: int, ts: float, exit_code: str | None, line_idx: int) -> None:
@@ -144,7 +164,7 @@ def parseLog(
         if not has_output:
             Con.error(
                 f"Line {line_idx}: pid {pid} made call {call} which doesn't contain an output file (-o). "
-                "Don't know what to do with it, ignoring. Full command args are: {args_str}"
+                f"Don't know what to do with it, ignoring. Full command args are: {args_str}"
             )
             return
         is_compile = ' "-c"' in args_str
@@ -205,7 +225,7 @@ def parseLog(
                 "-iquote",
                 "-isysroot",
                 "--sysroot",
-                "-cxx-isystem", #TODO proper list + parsing combined args like --sysroot=/path
+                "-cxx-isystem",  # TODO proper list + parsing combined args like --sysroot=/path
             ):
                 next_is_path = True
             """elif do_test_files and arg.startswith((
@@ -219,7 +239,7 @@ def parseLog(
             )):
                 # TODO
                 pass"""
-            
+
         assert arg_output is not None
         assert is_link or arg_compile is not None
 
@@ -264,13 +284,13 @@ def parseLog(
                 handleExec(call, pid, ts, line_idx + 1, line[match_exec_or_exit.end() :])
 
     # finishing unfinished processes
-    for pid in running_pids.keys():
+    for pid in list(running_pids.keys()):
         handleExit(pid, 0.0, None, 0)
 
     assert 0 == len(running_pids)
-    Con.print("compile_commands = ", compile_commands)
-    Con.print("link_commands = ", link_commands)
-    return 0
+    if len(compile_commands) == 0 and len(link_commands)==0:
+        Con.warning("No compiler invocation were found in the log. If you're using a custom compiler, pass it in --compiler option.")
+    return compile_commands, compile_cmd_time, link_commands, link_cmd_time
 
 
 def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list) -> int:
@@ -292,7 +312,7 @@ def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: 
 
     args = updateCommonCliArgs(Con, args)
 
-    return parseLog(
+    compile_commands, compile_cmd_time, link_commands, link_cmd_time = parseLog(
         Con,
         args.log_file,
         args.cwd,
@@ -300,3 +320,23 @@ def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: 
         args.compiler,
         args.link_commands,
     )
+
+    dest_dir = args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else os.getcwd()
+
+    storeJson(
+        os.path.join(dest_dir, "compile_commands.json"),
+        compile_commands,
+        compile_cmd_time,
+        args.cwd,
+        False,
+    )
+    if args.link_commands:
+        storeJson(
+            os.path.join(dest_dir, "link_commands.json"),
+            link_commands,
+            link_cmd_time,
+            args.cwd,
+            True,
+        )
+
+    return 0
