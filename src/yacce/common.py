@@ -11,11 +11,11 @@ import rich.console
 class LoggingConsole(rich.console.Console):
     # @enum.verify(enum.CONTINUOUS)  # not supported by Py 3.10
     class LogLevel(enum.IntEnum):
-        Debug = (0,)
-        Info = (1,)
-        Warning = (2,)
-        Error = (3,)
-        Failure = (4,)
+        Debug = 0
+        Info = 1
+        Warning = 2
+        Error = 3
+        Failure = 4
         Critical = 5
 
     def __init__(self, log_level: LogLevel = LogLevel.Debug, **kwargs):
@@ -78,7 +78,7 @@ kMainDescription = (
 )
 
 
-def addCommonCliArgs(parser: argparse.ArgumentParser):
+def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     """ "Adds arguments common for multiple modes to the given parser."""
     parser.add_argument(
         "--cwd",
@@ -87,8 +87,8 @@ def addCommonCliArgs(parser: argparse.ArgumentParser):
         "This value goes to 'directory' field of an "
         "entry of compile_commands.json and is used to resolve relative paths found in the command. "
         "yacce will try to test if mentioned files exist in this directory and warn if they aren't, "
-        "but this alone doesn't guarantee that the resulting compile_commands.json will be correct. "
-        "Default: directory of the log file.",
+        "but this alone doesn't guarantee that the resulting compile_commands.json will be correct."
+        + addendums.get("cwd", ""),
         type=str,
     )
 
@@ -119,41 +119,12 @@ def addCommonCliArgs(parser: argparse.ArgumentParser):
     parser.add_argument(
         "-d",
         "--dest_dir",
-        help="Destination directory into which to create compile_commands.json. Default: current working directory.",
+        help="Destination directory into which to create compile_commands.json. Default: current working directory."
+        + addendums.get("dest_dir", ""),
         type=str,
     )
 
     return parser
-
-
-def fixCwdArg(Con: LoggingConsole, args: argparse.Namespace) -> argparse.Namespace:
-    """Fixes the --cwd argument if it starts with %%LOG%% to point to a directory of the log file.
-    If --cwd is not set, returns the directory of the log file.
-    Also tests existence of the directory if it is set and not ignored, and modifies args.ignore_not_found
-    if the directory doesn't exist.
-    """
-    assert isinstance(args, argparse.Namespace) and hasattr(args, "ignore_not_found")
-    assert hasattr(args, "log_file") and isinstance(args.log_file, str)
-
-    if hasattr(args, "cwd") and args.cwd:
-        cwd = (
-            os.path.dirname(args.log_file) + "/" + args.cwd.removeprefix("%LOG%")
-            if args.cwd.startswith("%LOG%")
-            else args.cwd
-        )
-    else:
-        cwd = os.path.dirname(args.log_file)
-
-    cwd = os.path.realpath(cwd)
-    if not args.ignore_not_found and not os.path.isdir(cwd):
-        Con.warning(
-            f"Working directory '{cwd}' does not exist, will not check file existence. "
-            "Resulting compile_commands.json will likely be incorrect."
-        )
-        setattr(args, "ignore_not_found", True)
-
-    setattr(args, "cwd", cwd)
-    return args
 
 
 CompilersTuple = namedtuple("CompilersTuple", ["basenames", "fullpaths"])
@@ -168,7 +139,7 @@ def makeCompilersSet(custom_compilers: list[str] | None) -> CompilersTuple:
     assert all(isinstance(c, str) for c in custom_compilers)
 
     kGccVers = (9, 18)
-    kGccPfxs = ("","x86_64-linux-gnu-")
+    kGccPfxs = ("", "x86_64-linux-gnu-")
     kClangVers = (10, 25)
 
     basenames = frozenset(
@@ -187,7 +158,31 @@ def makeCompilersSet(custom_compilers: list[str] | None) -> CompilersTuple:
     return CompilersTuple(basenames=basenames, fullpaths=paths)
 
 
-def updateCommonCliArgs(Con: LoggingConsole, args: argparse.Namespace) -> argparse.Namespace:
-    assert isinstance(args, argparse.Namespace)
-    setattr(args, "compiler", makeCompilersSet(args.compiler))
-    return fixCwdArg(Con, args)
+def storeJson(
+    filename: str, commands: list[tuple], cmd_times: list[float], cwd: str, is_link: bool
+):
+    cwd = cwd.replace('"', '"')
+    with open(filename, "w") as f:
+        f.write("[\n")
+        for idx, cmd_tuple in enumerate(commands):
+            f.write(("," if idx > 0 else "") + "{\n")
+            f.write(f' "directory": "{cwd}",\n')
+            if is_link:
+                args_str, arg_output = cmd_tuple
+            else:
+                args_str, arg_output, arg_compile = cmd_tuple
+                f.write(f' "file": "{arg_compile}",\n')
+
+            f.write(f' "arguments": {args_str},\n')
+            f.write(f' "output": "{arg_output}",\n')
+            f.write(f' "duration_s": {cmd_times[idx]:.6f}\n')
+            f.write("}\n")
+
+        f.write("]\n")
+
+
+def rawPathExists(cwd: str, path: str) -> bool:
+    path = path.encode("latin1").decode("unicode_escape")
+    if not os.path.isabs(path):
+        path = os.path.join(cwd, path)
+    return os.path.exists(path)

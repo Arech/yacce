@@ -7,38 +7,10 @@ from .common import (
     CompilersTuple,
     kMainDescription,
     LoggingConsole,
-    updateCommonCliArgs,
+    makeCompilersSet,
+    rawPathExists,
+    storeJson,
 )
-
-
-def storeJson(
-    filename: str, commands: list[tuple], cmd_times: list[float], cwd: str, is_link: bool
-):
-    cwd = cwd.replace('"','\"')
-    with open(filename, "w") as f:
-        f.write("[\n")
-        for idx,cmd_tuple in enumerate(commands):
-            f.write("{\n")
-            f.write(f" \"directory\": \"{cwd}\",\n")
-            if is_link:
-                args_str, arg_output = cmd_tuple
-            else:
-                args_str, arg_output, arg_compile = cmd_tuple
-                f.write(f" \"file\": \"{arg_compile}\",\n")
-
-            f.write(f" \"arguments\": {args_str},\n")
-            f.write(f" \"output\": \"{arg_output}\",\n")
-            f.write(f" \"duration_s\": {cmd_times[idx]:.6f}\n")
-            f.write("}\n")
-
-        f.write("]\n")
-
-
-def rawPathExists(cwd: str, path: str) -> bool:
-    path = path.encode("latin1").decode("unicode_escape")
-    if not os.path.isabs(path):
-        path = os.path.join(cwd, path)
-    return os.path.exists(path)
 
 
 def parseLog(
@@ -243,6 +215,21 @@ def parseLog(
         assert arg_output is not None
         assert is_link or arg_compile is not None
 
+        #####
+        # quick check if for each path argument that starts with external there exist a corresponding argument that starts with bazel-out/k8-opt/bin/external
+        """for arg in args:
+            if arg.startswith("external/") and not arg.endswith((".cpp",".c",".cc",".S")):
+                found=False
+                rMatch=re.compile(r"^bazel-out/[^\/]+/bin/" + re.escape(arg)+"$")
+                for a in args:
+                    if rMatch.match(a):
+                        found = True
+                        break
+                if not found:
+                    Con.warning(f"Line {line_idx}, pid {pid}: no alternative for {arg}")
+                    """
+        #####
+
         # TODO: do we need to fix the first argument in args to be the same as the one used in
         # execve()? It might be different depending how execve() was called.
 
@@ -288,12 +275,44 @@ def parseLog(
         handleExit(pid, 0.0, None, 0)
 
     assert 0 == len(running_pids)
-    if len(compile_commands) == 0 and len(link_commands)==0:
-        Con.warning("No compiler invocation were found in the log. If you're using a custom compiler, pass it in --compiler option.")
+    if len(compile_commands) == 0 and len(link_commands) == 0:
+        Con.warning(
+            "No compiler invocation were found in the log. If you're using a custom compiler, pass it in --compiler option."
+        )
     return compile_commands, compile_cmd_time, link_commands, link_cmd_time
 
 
-def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list) -> int:
+def _fixCwdArg(Con: LoggingConsole, args: argparse.Namespace) -> argparse.Namespace:
+    """Fixes the --cwd argument if it starts with %%LOG%% to point to a directory of the log file.
+    If --cwd is not set, returns the directory of the log file.
+    Also tests existence of the directory if it is set and not ignored, and modifies args.ignore_not_found
+    if the directory doesn't exist.
+    """
+    assert isinstance(args, argparse.Namespace) and hasattr(args, "ignore_not_found")
+    assert hasattr(args, "log_file") and isinstance(args.log_file, str)
+
+    if hasattr(args, "cwd") and args.cwd:
+        cwd = (
+            os.path.dirname(args.log_file) + "/" + args.cwd.removeprefix("%LOG%")
+            if args.cwd.startswith("%LOG%")
+            else args.cwd
+        )
+    else:
+        cwd = os.path.dirname(args.log_file)
+
+    cwd = os.path.realpath(cwd)
+    if not args.ignore_not_found and not os.path.isdir(cwd):
+        Con.warning(
+            f"Working directory '{cwd}' does not exist, will not check file existence. "
+            "Resulting compile_commands.json will likely be incorrect."
+        )
+        setattr(args, "ignore_not_found", True)
+
+    setattr(args, "cwd", cwd)
+    return args
+
+
+def _getArgs(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="yacce from_log",
         description=kMainDescription
@@ -303,14 +322,19 @@ def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: 
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("log_file", help="Path to the strace log file to parse.", type=str)
-    parser = addCommonCliArgs(parser)
+    parser = addCommonCliArgs(parser, {"cwd": " Default: directory of the log file."})
     args = parser.parse_args(unparsed_args, namespace=args)
 
     if args.log_file is None or not os.path.isfile(args.log_file):
-        Con.critical("Log file is not specified or does not exist.")
-        return 1
+        raise RuntimeError("Log file is not specified or does not exist.")
 
-    args = updateCommonCliArgs(Con, args)
+    args = _fixCwdArg(Con, args)
+    setattr(args, "compiler", makeCompilersSet(args.compiler))
+    return args
+
+
+def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list) -> int:
+    args = _getArgs(Con, args, unparsed_args)
 
     compile_commands, compile_cmd_time, link_commands, link_cmd_time = parseLog(
         Con,
