@@ -8,15 +8,18 @@ from yacce.mod_from_log import mode_from_log
 
 # default mode is the first
 kModes = {
-    "bazel": "Run a given build system based on Bazel and extract compile_commands.json from it (possibly "
-    "with individual auxiliary compile_commands.json for each dependency). This is the default mode ",
+    "bazel": "Runs given build system based on Bazel and extract compile_commands.json from it (possibly "
+    "with individual auxiliary compile_commands.json for each dependency). This is a default mode "
+    "activated if the mode specification is just omitted.",
+
     "from_log": "[dbg] Generate a possibly NON-WORKING(!) compile_commands.json from a strace log file. "
     "This mode features the most generic way to parse strace output and since the log generally "
     "lacks some important information (such as the working directory in case of Bazel, "
     "which substitutes PWD with a useless /proc/self/cwd), it may produce a non-working "
     "compile_commands.json. This mode is primarily intended for debugging purposes as it doesn't "
     "use any assumptions about the build system and just parses the strace log file and turns it "
-    "into compile_commands.json as is.",
+    "into compile_commands.json as is. Note that you might want to disable checking files existence "
+    "with --ignore-not-found",
 }
 
 kModeFuncs = {"bazel": mode_bazel, "from_log": mode_from_log}

@@ -82,12 +82,11 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     """ "Adds arguments common for multiple modes to the given parser."""
     parser.add_argument(
         "--cwd",
-        help="Absolute path of working directory of the compilation. If starts with a literal "
-        "'%%LOG%%', the literal part is replaced with the directory of the log file. "
+        help="Path of working directory of the compilation. "
         "This value goes to 'directory' field of an "
         "entry of compile_commands.json and is used to resolve relative paths found in the command. "
         "yacce will try to test if mentioned files exist in this directory and warn if they aren't, "
-        "but this alone doesn't guarantee that the resulting compile_commands.json will be correct."
+        "but passing files existence test alone doesn't guarantee that the resulting compile_commands.json will be correct."
         + addendums.get("cwd", ""),
         type=str,
     )
@@ -121,7 +120,6 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         "--dest_dir",
         help="Destination directory into which to create compile_commands.json. Default: current working directory."
         + addendums.get("dest_dir", ""),
-        type=str,
     )
 
     return parser

@@ -283,7 +283,7 @@ def parseLog(
 
 
 def _fixCwdArg(Con: LoggingConsole, args: argparse.Namespace) -> argparse.Namespace:
-    """Fixes the --cwd argument if it starts with %%LOG%% to point to a directory of the log file.
+    """Fixes the --cwd argument if it's relative path spec.
     If --cwd is not set, returns the directory of the log file.
     Also tests existence of the directory if it is set and not ignored, and modifies args.ignore_not_found
     if the directory doesn't exist.
@@ -293,9 +293,7 @@ def _fixCwdArg(Con: LoggingConsole, args: argparse.Namespace) -> argparse.Namesp
 
     if hasattr(args, "cwd") and args.cwd:
         cwd = (
-            os.path.dirname(args.log_file) + "/" + args.cwd.removeprefix("%LOG%")
-            if args.cwd.startswith("%LOG%")
-            else args.cwd
+            args.cwd if os.path.isabs(args.cwd) else os.path.dirname(args.log_file) + "/" + args.cwd
         )
     else:
         cwd = os.path.dirname(args.log_file)
@@ -312,7 +310,9 @@ def _fixCwdArg(Con: LoggingConsole, args: argparse.Namespace) -> argparse.Namesp
     return args
 
 
-def _getArgs(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list) -> argparse.Namespace:
+def _getArgs(
+    Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list
+) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="yacce from_log",
         description=kMainDescription
@@ -322,7 +322,14 @@ def _getArgs(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list)
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("log_file", help="Path to the strace log file to parse.", type=str)
-    parser = addCommonCliArgs(parser, {"cwd": " Default: directory of the log file."})
+    parser = addCommonCliArgs(
+        parser,
+        {
+            "cwd": " Relative path specification is always resolved to "
+            "the absolute path using directory of the log file. "
+            "Default: directory of the log file."
+        },
+    )
     args = parser.parse_args(unparsed_args, namespace=args)
 
     if args.log_file is None or not os.path.isfile(args.log_file):
