@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 
 from .common import (
     addCommonCliArgs,
@@ -14,7 +15,7 @@ from .common import (
 
 def _getArgs(
     Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list
-) -> argparse.Namespace:
+) -> tuple[argparse.Namespace, list]:
     parser = argparse.ArgumentParser(
         prog="yacce bazel",
         description=kMainDescription
@@ -31,25 +32,39 @@ def _getArgs(
         default=os.path.join(os.getcwd(), "strace.txt"),
     )
 
-    mut_ex_group = parser.add_mutually_exclusive_group()
-
-    mut_ex_group.add_argument(
+    p_log = parser.add_argument_group(
+        "For using existing strace log (mutually exclusive with live mode)"
+    )
+    excl1 = {"from_log"}
+    p_log.add_argument(
         "--from_log",
         help="Toggle a mode in which yacce will only parse the log specified in --log_file, but "
         "will not invoke any build system on its own. Mutually exclusive with --keep_log.",
         action="store_true",
     )
 
-    mut_ex_group.add_argument(
+    p_live = parser.add_argument_group("For running live bazel (mutually exclusive with log mode)")
+    excl2 = {"keep_log"}
+    p_live.add_argument(
         "--keep_log",
         choices=["if_failed", "always", "never"],
         help="Determines what to do with the log file after building, generation and parsing of the "
         "log file finishes. Default is 'if_failed'. Mutually exclusive with --from_log.",
     )
+    excl2 |= {"clean"}
+    p_live.add_argument(
+        "--clean",
+        choices=["always", "expunge", "never"],
+        help="Determines, if 'bazel clean' or 'bazel clean --expunge' commands are executed, or no "
+        "cleaning is done before running the build. Note that if cleaning is disabled, "
+        "cached (already compiled) translation units will be invisible to yacce and hence will not "
+        "make it into resulting compiler_commands.json!",
+    )
 
     parser.add_argument(
         "--external",
         choices=["ignore", "separate", "squash"],
+        default="ignore",
         help="Determines what to do when a compilation of a project's dependency (from 'external/' "
         "subdirectory) is found. Default option is to just 'ignore' it and not save into the "
         "resulting compile_commands.json. You can also ask yacce to produce individual 'separate' "
@@ -61,26 +76,70 @@ def _getArgs(
 
     parser.add_argument(
         "--external_save_path",
-        help="If '--external separate' this option will override the directory into which save "
-        "dependency specific compile_commands.json. Default is '$(bazel info output_base)/external'",
+        help="If '--external separate' was set, using this option one could override a directory into which to save "
+        "dependencies specific individual compile_commands.json. Default is '$(bazel info output_base)/external'",
+    )
+
+    parser.add_argument(
+        "--output_base",
+        help="An override to use in place of $(bazel info output_base).",
+    )
+
+    parser.add_argument(
+        "--bazel_command",
+        default="bazel",
+        help="A command to run to communicate with instance of bazel for current build system. "
+        "Note that it always assumes that yacce runs inside a bazel workspace directory. "
+        "Default: %(default)s",
     )
 
     parser = addCommonCliArgs(
         parser,
-        {"cwd": " Default: directory returned by '$(bazel info execution_root)' after build ends."},
+        {"cwd": " Set this to override output of $(bazel info execution_root)."},
     )
 
-    # TODO -- handling!
+    # looking for -- in unparsed_args to save build system invocation args.
+    if len(unparsed_args) < 2:  # the shortest is "-- build_script.sh"
+        parser.print_help()
+        sys.exit(2)
 
-    args = parser.parse_args(unparsed_args, namespace=args)
+    for first_rest, arg in enumerate(unparsed_args):  # .index() with exception is a crap.
+        if "--" == arg:
+            break
+
+    if first_rest + 1 <= len(unparsed_args):
+        mode_args = unparsed_args[:first_rest]
+        unparsed_args = unparsed_args[first_rest + 1 :]
+    else:
+        mode_args = unparsed_args
+        unparsed_args = []
+
+    args = parser.parse_args(mode_args, namespace=args)
+
+    # checking mutually exclusive options
+    if any(getattr(args, a, False) for a in excl1) and any(getattr(args, a, False) for a in excl2):
+        parser.print_help()
+        Con.critical("Options from these two lists are mutually exclusive: ", excl1, excl2)
+        sys.exit(2)
+    # taking care of defaults that weren't set due to mutual exclusion check. argparse is a crap too
+    if args.keep_log is None:
+        setattr(args, "keep_log", "if_failed")
+    if args.clean is None:
+        setattr(args, "clean", "always")
 
     setattr(args, "compiler", makeCompilersSet(args.compiler))
-    return args
+    return args, unparsed_args
 
 
 def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list) -> int:
-    args = _getArgs(Con, args, unparsed_args)
+    args, unparsed_args = _getArgs(Con, args, unparsed_args)
 
-    Con.info(args)
+    Con.debug("bazel mode args: ", args)
+    Con.debug("unparsed_args:", unparsed_args)
 
-    return 3
+    if not args.from_log:
+        #TODO run the build system and gather trace. Note, there'll be different trace filename!
+        pass
+    
+
+    return 0
