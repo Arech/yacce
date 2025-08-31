@@ -132,14 +132,20 @@ def _getArgs(
 
 
 def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list) -> int:
-    args, unparsed_args = _getArgs(Con, args, unparsed_args)
+    args, build_system_args = _getArgs(Con, args, unparsed_args)
 
     Con.debug("bazel mode args: ", args)
-    Con.debug("unparsed_args:", unparsed_args)
+    Con.debug("build_system_args:", build_system_args)
 
     if not args.from_log:
-        #TODO run the build system and gather trace. Note, there'll be different trace filename!
+        # TODO call bazel clean
+        # TODO run the build system and gather trace. Note, there'll be different trace filename!
         pass
     
+    # only after finishing the build we could query bazel properties
+    # TODO update args.cwd
+    # TODO update args.output_base
+
+    # parsing strace log to produce raw commands.
 
     return 0

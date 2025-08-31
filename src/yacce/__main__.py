@@ -98,12 +98,15 @@ def main():
 
     if not hasattr(args, "mode"):
         Con.debug("Mode is not specified, using the default")
-    mode = args.mode if hasattr(args, "mode") else next(iter(kModes))
+    mode = getattr(args, "mode", next(iter(kModes)))
 
     try:
-        sys,exit(kModeFuncs[mode](Con, args, unparsed_args))
-    except Exception as e:
+        ret = kModeFuncs[mode](Con, args, unparsed_args)
+        Con.debug(f"Exiting with code {ret}")
+        sys.exit(ret)
+    except common.YacceException as e:
         Con.critical(repr(e))
+        Con.debug("Exiting with code 1")
         sys.exit(1)
 
 
