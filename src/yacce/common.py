@@ -114,6 +114,15 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     )
 
     parser.add_argument(
+        "--save_duration",
+        help="If set, will add 'duration_s' field into a resulting .json that contain how long the command run in "
+        "seconds with microsecond resolution. Have no automated use, but can be inspected manually, or with a custom "
+        "script to obtain build system performance insights. Default: %(default)s",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+
+    parser.add_argument(
         "-c",
         "--compiler",
         help="Abs path or basename of a custom compiler used by the build system. Many such arguments can be passed.",
@@ -182,10 +191,19 @@ class BaseParser:
         do_link: bool,
     ) -> None:
         self.Con = Con
-        self._cwd = cwd
-        self._test_files = do_test_files
         self._compilers = compilers
         self._do_link = do_link
+        self._cwd = cwd
+        self._test_files = do_test_files
+
+        assert isinstance(cwd, str)
+        if do_test_files and not os.path.isdir(cwd):
+            Con.warning(
+                "Compilation directory '",
+                cwd,
+                "' doesn't exist. If you used --cwd option, check its correctness. "
+                "Resulting json will likely be invalid.",
+            )
 
         self._running_pids: dict[int, ProcessProps] = {}
 
@@ -282,7 +300,7 @@ class BaseParser:
 
         del self._running_pids[pid]
 
-    def _handleExec(self, call: str, pid: int, ts: float, line_idx: int, line: str) -> None:
+    def _handleExec(self, call: str, pid: int, ts: float, line_num: int, line: str) -> None:
         assert pid not in self._running_pids  # should be checked by the caller
         """assert call in ("execve", "execveat"), (
             f"Line {line_idx}: pid {pid} made call {call}. The code is inconsistent "
@@ -295,7 +313,7 @@ class BaseParser:
         assert line[0:1] == "(", "Unexpected format of the {call} syscall in the log file"
         if not (line.endswith(" = 0\n") or line.endswith(" = 0")):
             self.Con.warning(
-                f"Line {line_idx}: pid {pid} made call {call} but the return code is not 0. "
+                f"Line {line_num}: pid {pid} made call {call} but the return code is not 0. "
                 "This might mean the build wasn't successful and the resulting compile_commands.json "
                 "might be incomplete."
             )
@@ -303,7 +321,7 @@ class BaseParser:
         # extract the first argument of execve, which is the executable path
         match_filepath = self._rInQuotes.match(line[1:])
         assert match_filepath, (
-            f"Line {line_idx}: pid {pid} made call {call} but the executable path argument couldn't be parsed. "
+            f"Line {line_num}: pid {pid} made call {call} but the executable path argument couldn't be parsed. "
             "This might mean the log file is malformed or the regexp is incorrect"
         )
 
@@ -324,7 +342,7 @@ class BaseParser:
         # they don't have to be shell-escaped
         match_args = self._rInBraces.match(line[args_start_pos:])
         assert match_args, (
-            f"Line {line_idx}: pid {pid} made call {call} but the arguments array couldn't be parsed. "
+            f"Line {line_num}: pid {pid} made call {call} but the arguments array couldn't be parsed. "
             "This might mean the log file is malformed or rInBraces regexp is incorrect"
         )
 
@@ -334,7 +352,7 @@ class BaseParser:
         has_output = ' "-o"' in args_str
         if not has_output:
             self.Con.error(
-                f"Line {line_idx}: pid {pid} made call {call} which doesn't contain an output file (-o). "
+                f"Line {line_num}: pid {pid} made call {call} which doesn't contain an output file (-o). "
                 f"Don't know what to do with it, ignoring. Full command args are: {args_str}"
             )
             return
@@ -362,7 +380,7 @@ class BaseParser:
                 next_is_path = False
                 if self._test_files and not rawPathExists(self._cwd, arg):
                     self.Con.warning(
-                        f"Line {line_idx}: pid {pid} made call {call} with argument '{arg}' "
+                        f"Line {line_num}: pid {pid} made call {call} with argument '{arg}' "
                         "which doesn't exist. This might mean the build system is misconfigured "
                         "or the log file is incomplete and hence so is the resulting compile_commands.json. "
                         f"Full command args are: {args_str}"
@@ -371,7 +389,7 @@ class BaseParser:
                     next_is_compile = False
                     if arg_compile is not None:
                         self.Con.warning(
-                            f"Line {line_idx}: pid {pid} made call {call} with multiple -c options. "
+                            f"Line {line_num}: pid {pid} made call {call} with multiple -c options. "
                             f"This is unusual, taking the last one. Full command args are: {args_str}"
                         )
                     arg_compile = arg  # it's already escaped
@@ -379,7 +397,7 @@ class BaseParser:
                     next_is_output = False
                     if arg_output is not None:
                         self.Con.warning(
-                            f"Line {line_idx}: pid {pid} made call {call} with multiple -o options. "
+                            f"Line {line_num}: pid {pid} made call {call} with multiple -o options. "
                             f"This is unusual, taking the last one. Full command args are: {args_str}"
                         )
                     arg_output = arg  # it's already escaped
@@ -433,22 +451,22 @@ class BaseParser:
         # execve()? It might be different depending how execve() was called.
 
         if is_link:
-            self.link_commands.append(LinkCommand(args_str, arg_output))
+            self.link_commands.append(LinkCommand(args, arg_output))
             cmd_idx = len(self.link_cmd_time)
             self.link_cmd_time.append(0.0)
         else:
-            self.compile_commands.append(CompileCommand(args_str, arg_output, arg_compile))
+            self.compile_commands.append(CompileCommand(args, arg_output, arg_compile))
             cmd_idx = len(self.compile_cmd_time)
             self.compile_cmd_time.append(0.0)
 
-        self._running_pids[pid] = ProcessProps(ts, line_idx, is_link, cmd_idx)
+        self._running_pids[pid] = ProcessProps(ts, line_num, is_link, cmd_idx)
 
 
 def storeJson(
     Con: LoggingConsole,
     path: str,
     commands: list[CompileCommand] | list[LinkCommand],
-    cmd_times: list[float],
+    cmd_times: list[float] | None,
     cwd: str,
 ):
     if not commands:
@@ -456,7 +474,8 @@ def storeJson(
         Con.debug("storeJson() got empty list for path", path)
         return
 
-    assert len(commands) == len(cmd_times)
+    save_duration = cmd_times is not None
+    assert not save_duration or len(commands) == len(cmd_times)
 
     e = next(iter(commands))
     is_link = isinstance(e, LinkCommand)
@@ -464,21 +483,23 @@ def storeJson(
 
     filename = os.path.join(path, ("link" if is_link else "compile") + "_commands.json")
 
-    cwd = cwd.replace('"', '"')
+    cwd = cwd.replace('"', '\\"')
     with open(filename, "w") as f:
         f.write("[\n")
         for idx, cmd_tuple in enumerate(commands):
             f.write(("," if idx > 0 else "") + "{\n")
             f.write(f' "directory": "{cwd}",\n')
             if is_link:
-                args_str, arg_output = cmd_tuple
+                args, arg_output = cmd_tuple
             else:
-                args_str, arg_output, arg_compile = cmd_tuple
+                args, arg_output, arg_compile = cmd_tuple
                 f.write(f' "file": "{arg_compile}",\n')
 
-            f.write(f' "arguments": {args_str},\n')
-            f.write(f' "output": "{arg_output}",\n')
-            f.write(f' "duration_s": {cmd_times[idx]:.6f}\n')
+            args_str = '", "'.join(args)
+            f.write(f' "arguments": ["{args_str}"],\n')
+            if save_duration:
+                f.write(f' "duration_s": {cmd_times[idx]:.6f},\n')
+            f.write(f' "output": "{arg_output}"\n')
             f.write("}\n")
 
         f.write("]\n")

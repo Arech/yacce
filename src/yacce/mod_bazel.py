@@ -2,9 +2,11 @@ import argparse
 import os
 import sys
 
+from yacce.common import CompilersTuple
+
 from .common import (
     addCommonCliArgs,
-    CompilersTuple,
+    BaseParser,
     kMainDescription,
     LoggingConsole,
     makeCompilersSet,
@@ -103,13 +105,16 @@ def _getArgs(
         parser.print_help()
         sys.exit(2)
 
+    not_found = 1
     for first_rest, arg in enumerate(unparsed_args):  # .index() with exception is a crap.
         if "--" == arg:
+            not_found = 0
             break
 
-    if first_rest + 1 <= len(unparsed_args):
-        mode_args = unparsed_args[:first_rest]
-        unparsed_args = unparsed_args[first_rest + 1 :]
+    first_rest += 1 + not_found
+    if first_rest < len(unparsed_args):
+        mode_args = unparsed_args[: first_rest - 1]
+        unparsed_args = unparsed_args[first_rest:]
     else:
         mode_args = unparsed_args
         unparsed_args = []
@@ -131,6 +136,34 @@ def _getArgs(
     return args, unparsed_args
 
 
+class BazelParser(BaseParser):
+    def __init__(
+        self,
+        Con: LoggingConsole,
+        log_file: str,
+        cwd: str,  # cwd is execution root dir
+        do_test_files: bool,
+        compilers: CompilersTuple,
+        do_link: bool,
+        output_base: str,
+    ) -> None:
+        super().__init__(Con, log_file, cwd, False, compilers, do_link)
+
+        self._test_files = do_test_files
+        self._output_base = output_base
+
+        assert isinstance(output_base, str), (
+            "Output base parameter is mandatory. Use --output_base CLI option."
+        )
+        if do_test_files and not os.path.isdir(output_base):
+            Con.warning(
+                "Output base directory '",
+                output_base,
+                "' does not exist. If you used an override --output_base, you might need to fix it. "
+                "Resulting json will likely be invalid.",
+            )
+
+
 def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list) -> int:
     args, build_system_args = _getArgs(Con, args, unparsed_args)
 
@@ -140,12 +173,42 @@ def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: lis
     if not args.from_log:
         # TODO call bazel clean
         # TODO run the build system and gather trace. Note, there'll be different trace filename!
+        # so an update to args.log_file is needed
         pass
-    
+
     # only after finishing the build we could query bazel properties
-    # TODO update args.cwd
-    # TODO update args.output_base
+    # TODO update args.cwd from bazel
+    # TODO update args.output_base from bazel
 
     # parsing strace log to produce raw commands.
+    p = BazelParser(
+        Con,
+        args.log_file,
+        args.cwd,
+        not args.ignore_not_found,
+        args.compiler,
+        args.link_commands,
+        args.output_base,
+    )
+
+    # TODO handling of args.external and args.external_save_path
+
+    dest_dir = args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else os.getcwd()
+
+    storeJson(
+        Con,
+        dest_dir,
+        p.compile_commands,
+        p.compile_cmd_time if args.save_duration else None,
+        args.cwd,
+    )
+    if args.link_commands:
+        storeJson(
+            Con,
+            dest_dir,
+            p.link_commands,
+            p.link_cmd_time if args.save_duration else None,
+            args.cwd,
+        )
 
     return 0
