@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import sys
 
 from yacce.common import CompilersTuple
@@ -7,6 +8,8 @@ from yacce.common import CompilersTuple
 from .common import (
     addCommonCliArgs,
     BaseParser,
+    CompileCommand,
+    LinkCommand,
     kMainDescription,
     LoggingConsole,
     makeCompilersSet,
@@ -147,6 +150,7 @@ class BazelParser(BaseParser):
         do_link: bool,
         output_base: str,
     ) -> None:
+        Con.debug("Running base parser")
         super().__init__(Con, log_file, cwd, False, compilers, do_link)
 
         self._test_files = do_test_files
@@ -161,6 +165,72 @@ class BazelParser(BaseParser):
                 output_base,
                 "' does not exist. If you used an override --output_base, you might need to fix it. "
                 "Resulting json will likely be invalid.",
+            )
+
+        Con.debug("Starting bazel specific processing...")
+        self._update()
+
+    def _update(self) -> None:
+        ext_paths: dict[str, str] = {}  # external canonical_name -> realpath
+        ext_ccs: dict[str, list[CompileCommand]] = {}
+        ext_cctimes: dict[str, list[float]] = {}
+        # TODO link commands!
+
+        new_cc = []  # new compile_commands for the project only
+        new_cc_time = []
+
+        r_external = re.compile(r"^(?:\.\/)?external\/([^\/]+)\/")
+        #TODO: generated files such as 'bazel-out/k8-opt/bin/external/xla/xla/xla_data.pb.cc' are
+        # also externals! Validate via output: bazel-out/k8-opt/bin/external/xla/xla/_objs/xla_data_proto_cc_impl/xla_data.pb.pic.o
+
+        for ccidx, cc in enumerate(self.compile_commands):
+            cctime = self.compile_cmd_time[ccidx]
+            m_external = r_external.match(cc.tu)
+            if m_external:
+                repo = m_external.group(1)
+                if repo not in ext_paths:
+                    repo_path = os.path.realpath(os.path.join(self._cwd, "external", repo))
+                    if self._test_files and not os.path.isdir(repo_path):
+                        self.Con.warning(
+                            "External repo", repo, "failed existence test at path", repo_path
+                        )
+                    ext_paths[repo] = repo_path
+
+                ext_ccs.setdefault(repo, []).append(cc)
+                ext_cctimes.setdefault(repo, []).append(cctime)
+
+            else:
+                new_cc.append(cc)
+                new_cc_time.append(cctime)
+
+        self.Con.debug("externals mapping", ext_paths)
+
+        self._ext_paths = ext_paths
+        self._ext_ccs = ext_ccs
+        self._ext_cctimes = ext_cctimes
+        # TODO link commands!
+
+        self._new_cc = new_cc
+        self._new_cc_time = new_cc_time
+
+    def storeJsons(self, dest_dir: str, save_duration: bool):
+        super().storeJsons(dest_dir, save_duration)
+        storeJson(
+            self.Con,
+            dest_dir,
+            self._new_cc,
+            self._new_cc_time if save_duration else None,
+            self._cwd,
+            "_new",
+        )
+        for repo,lst in self._ext_ccs.items():
+            storeJson(
+                self.Con,
+                dest_dir,
+                lst,
+                self._ext_cctimes[repo] if save_duration else None,
+                self._cwd,
+                f"_ext_{repo}",
             )
 
 
@@ -195,20 +265,6 @@ def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: lis
 
     dest_dir = args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else os.getcwd()
 
-    storeJson(
-        Con,
-        dest_dir,
-        p.compile_commands,
-        p.compile_cmd_time if args.save_duration else None,
-        args.cwd,
-    )
-    if args.link_commands:
-        storeJson(
-            Con,
-            dest_dir,
-            p.link_commands,
-            p.link_cmd_time if args.save_duration else None,
-            args.cwd,
-        )
+    p.storeJsons(dest_dir, args.save_duration)
 
     return 0

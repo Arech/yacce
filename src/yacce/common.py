@@ -215,21 +215,21 @@ class BaseParser:
 
         # greedy match repeatedly blocks ending on escaped quote \" literal, or that doesn't contain
         # quotes at all until first unescaped quote
-        self._rInQuotes = re.compile(r"\"((?:[^\"]*\\\"|[^\"]*)*)\"")
+        self._r_in_quotes = re.compile(r"\"((?:[^\"]*\\\"|[^\"]*)*)\"")
         # greedy match [] with any chars inside of ""
-        self._rInBraces = re.compile(r"^\[(?:(?:[, ])*\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")*\]")
+        self._r_in_braces = re.compile(r"^\[(?:(?:[, ])*\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")*\]")
 
         self._parseLog(log_file)
 
     def _parseLog(self, log_file: str) -> None:
         # match the start of the log string: (<pid>) (<time.stamp>) (execve|execveat|exited...)
-        rExecOrExit = re.compile(
+        r_exec_or_exit = re.compile(
             r"(?P<pid>\d+) (?P<unix_ts>\d+)\.(?P<unix_ts_ms>\d+) (?P<call>execve|execveat|\+\+\+ exited with (?P<exit_code>\d+) \+\+\+)"
         )
 
         with open(log_file, "r") as file:
             for line_idx, line in enumerate(file):
-                match_exec_or_exit = rExecOrExit.match(line)
+                match_exec_or_exit = r_exec_or_exit.match(line)
                 if not match_exec_or_exit:
                     continue  # nothing to do here
 
@@ -319,7 +319,7 @@ class BaseParser:
             )
 
         # extract the first argument of execve, which is the executable path
-        match_filepath = self._rInQuotes.match(line[1:])
+        match_filepath = self._r_in_quotes.match(line[1:])
         assert match_filepath, (
             f"Line {line_num}: pid {pid} made call {call} but the executable path argument couldn't be parsed. "
             "This might mean the log file is malformed or the regexp is incorrect"
@@ -340,7 +340,7 @@ class BaseParser:
         )
         # we can't simply search for the closing ] because there might be braces in file names and
         # they don't have to be shell-escaped
-        match_args = self._rInBraces.match(line[args_start_pos:])
+        match_args = self._r_in_braces.match(line[args_start_pos:])
         assert match_args, (
             f"Line {line_num}: pid {pid} made call {call} but the arguments array couldn't be parsed. "
             "This might mean the log file is malformed or rInBraces regexp is incorrect"
@@ -348,14 +348,10 @@ class BaseParser:
 
         args_str = match_args.group()
 
+        # TODO: do args processing after @file extension is done, + argument variation split has been made
+
         # checking if it's a linking command (heuristic: if it contains -o and no -c)
         has_output = ' "-o"' in args_str
-        if not has_output:
-            self.Con.error(
-                f"Line {line_num}: pid {pid} made call {call} which doesn't contain an output file (-o). "
-                f"Don't know what to do with it, ignoring. Full command args are: {args_str}"
-            )
-            return
         is_compile = ' "-c"' in args_str
         is_link = not is_compile
 
@@ -366,7 +362,16 @@ class BaseParser:
         # such sequence in file names. So we use the same rInQuotes regexp to extract them one by one.
         # In a sense, it's a duplication of application of the same regexp as above, but we must
         # scope the search to the inside of the braces only
-        args = re.findall(self._rInQuotes, args_str)
+        args = re.findall(self._r_in_quotes, args_str)
+
+        if not has_output:
+            # TODO: do this only after @file handling
+
+            self.Con.error(
+                f"Line {line_num}: pid {pid} made call {call} which doesn't contain an output file (-o). "
+                f"Don't know what to do with it, ignoring. Full command args are: {args_str}"
+            )
+            return
 
         # now walking over the args and checking existence of those that we know to be files or dirs.
         # Also getting arguments of -o and -c options, if they are present
@@ -376,6 +381,7 @@ class BaseParser:
         arg_compile = None
         arg_output = None
         for arg in args:
+            # TODO argument blacklist
             if next_is_path:
                 next_is_path = False
                 if self._test_files and not rawPathExists(self._cwd, arg):
@@ -461,6 +467,23 @@ class BaseParser:
 
         self._running_pids[pid] = ProcessProps(ts, line_num, is_link, cmd_idx)
 
+    def storeJsons(self, dest_dir: str, save_duration: bool):
+        storeJson(
+            self.Con,
+            dest_dir,
+            self.compile_commands,
+            self.compile_cmd_time if save_duration else None,
+            self._cwd,
+        )
+        if self._do_link:
+            storeJson(
+                self.Con,
+                dest_dir,
+                self.link_commands,
+                self.link_cmd_time if save_duration else None,
+                self._cwd,
+            )
+
 
 def storeJson(
     Con: LoggingConsole,
@@ -468,6 +491,7 @@ def storeJson(
     commands: list[CompileCommand] | list[LinkCommand],
     cmd_times: list[float] | None,
     cwd: str,
+    apnd_REMOVE="",
 ):
     if not commands:
         assert not cmd_times
@@ -481,7 +505,7 @@ def storeJson(
     is_link = isinstance(e, LinkCommand)
     assert is_link or isinstance(e, CompileCommand)
 
-    filename = os.path.join(path, ("link" if is_link else "compile") + "_commands.json")
+    filename = os.path.join(path, ("link" if is_link else "compile") + f"_commands{apnd_REMOVE}.json")
 
     cwd = cwd.replace('"', '\\"')
     with open(filename, "w") as f:

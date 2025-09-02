@@ -80,21 +80,6 @@ def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: 
     )
 
     dest_dir = args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else os.getcwd()
-
-    storeJson(
-        Con,
-        dest_dir,
-        p.compile_commands,
-        p.compile_cmd_time if args.save_duration else None,
-        args.cwd,
-    )
-    if args.link_commands:
-        storeJson(
-            Con,
-            dest_dir,
-            p.link_commands,
-            p.link_cmd_time if args.save_duration else None,
-            args.cwd,
-        )
-
+    p.storeJsons(dest_dir, args.save_duration)
+    
     return 0
