@@ -6,6 +6,7 @@ import enum
 import os
 import re
 import rich.console
+import rich.progress
 
 
 class YacceException(RuntimeError):
@@ -40,6 +41,9 @@ class LoggingConsole(rich.console.Console):
             sep = " "
             kwargs["sep"] = sep
         return super().print(f"[[{color}]{lvl:4s}[/{color}]]{sep}", *args, **kwargs)
+
+    def will_log(self, level)->bool:
+        return self.log_level <= level
 
     def debug(self, *args, **kwargs):
         if self.log_level > LoggingConsole.LogLevel.Debug:
@@ -181,6 +185,20 @@ LinkCommand = namedtuple("LinkCommand", ("args", "output"))
 
 
 class BaseParser:
+    # TODO update the list!
+    # list of a compiler arguments that should contain a file/dir path
+    kArgIsPath = frozenset((
+        "-o",
+        "-c",
+        "-I",
+        "--include-directory",
+        "-isystem",
+        "-iquote",
+        "-isysroot",
+        "--sysroot",
+        "-cxx-isystem",
+    ))
+
     def __init__(
         self,
         Con: LoggingConsole,
@@ -227,7 +245,10 @@ class BaseParser:
             r"(?P<pid>\d+) (?P<unix_ts>\d+)\.(?P<unix_ts_ms>\d+) (?P<call>execve|execveat|\+\+\+ exited with (?P<exit_code>\d+) \+\+\+)"
         )
 
-        with open(log_file, "r") as file:
+        # with open(log_file, "r") as file:
+        with rich.progress.open(
+            log_file, "r", description="Parsing strace log file...", console=self.Con
+        ) as file:
             for line_idx, line in enumerate(file):
                 match_exec_or_exit = r_exec_or_exit.match(line)
                 if not match_exec_or_exit:
@@ -348,30 +369,12 @@ class BaseParser:
 
         args_str = match_args.group()
 
-        # TODO: do args processing after @file extension is done, + argument variation split has been made
-
-        # checking if it's a linking command (heuristic: if it contains -o and no -c)
-        has_output = ' "-o"' in args_str
-        is_compile = ' "-c"' in args_str
-        is_link = not is_compile
-
-        if not self._do_link and is_link:
-            return  # not interested in linking commands
-
         # Extracting args from the args_str. We can't simply split by ", " because there might be
         # such sequence in file names. So we use the same rInQuotes regexp to extract them one by one.
         # In a sense, it's a duplication of application of the same regexp as above, but we must
         # scope the search to the inside of the braces only
         args = re.findall(self._r_in_quotes, args_str)
-
-        if not has_output:
-            # TODO: do this only after @file handling
-
-            self.Con.error(
-                f"Line {line_num}: pid {pid} made call {call} which doesn't contain an output file (-o). "
-                f"Don't know what to do with it, ignoring. Full command args are: {args_str}"
-            )
-            return
+        assert len(args) > 1
 
         # now walking over the args and checking existence of those that we know to be files or dirs.
         # Also getting arguments of -o and -c options, if they are present
@@ -382,9 +385,10 @@ class BaseParser:
         arg_output = None
         for arg in args:
             # TODO argument blacklist
+            # TODO @file extension
             if next_is_path:
                 next_is_path = False
-                if self._test_files and not rawPathExists(self._cwd, arg):
+                if self._test_files and not unescapedPathExists(self._cwd, arg):
                     self.Con.warning(
                         f"Line {line_num}: pid {pid} made call {call} with argument '{arg}' "
                         "which doesn't exist. This might mean the build system is misconfigured "
@@ -407,22 +411,13 @@ class BaseParser:
                             f"This is unusual, taking the last one. Full command args are: {args_str}"
                         )
                     arg_output = arg  # it's already escaped
-            elif arg == "-o":
+            elif arg in self.kArgIsPath:
                 next_is_path = True
-                next_is_output = True
-            elif arg == "-c":
-                next_is_path = True
-                next_is_compile = True
-            elif arg in (
-                "-I",
-                "--include-directory",
-                "-isystem",
-                "-iquote",
-                "-isysroot",
-                "--sysroot",
-                "-cxx-isystem",  # TODO proper list + parsing combined args like --sysroot=/path
-            ):
-                next_is_path = True
+                if arg == "-o":
+                    next_is_output = True
+                elif arg == "-c":
+                    next_is_compile = True
+            # TODO parsing combined args like --sysroot=/path
             """elif do_test_files and arg.startswith((
                 "-I",
                 "--include-directory=",
@@ -435,8 +430,20 @@ class BaseParser:
                 # TODO
                 pass"""
 
-        assert arg_output is not None
-        assert is_link or arg_compile is not None
+        # checking if it's a linking command (heuristic: if it contains -o and no -c)
+        has_output = arg_output is not None
+        is_compile = arg_compile is not None
+        is_link = not is_compile
+
+        if not self._do_link and is_link:
+            return  # not interested in linking commands
+
+        if not has_output:
+            self.Con.error(
+                f"Line {line_num}: pid {pid} made call {call} which doesn't contain an output file (-o). "
+                f"Don't know what to do with it, ignoring. Full command args are: {args_str}"
+            )
+            return
 
         #####
         # quick check if for each path argument that starts with external there exist a corresponding argument that starts with bazel-out/k8-opt/bin/external
@@ -505,7 +512,9 @@ def storeJson(
     is_link = isinstance(e, LinkCommand)
     assert is_link or isinstance(e, CompileCommand)
 
-    filename = os.path.join(path, ("link" if is_link else "compile") + f"_commands{apnd_REMOVE}.json")
+    filename = os.path.join(
+        path, ("link" if is_link else "compile") + f"_commands{apnd_REMOVE}.json"
+    )
 
     cwd = cwd.replace('"', '\\"')
     with open(filename, "w") as f:
@@ -530,8 +539,21 @@ def storeJson(
     Con.info("Written", len(commands), "commands to", filename)
 
 
-def rawPathExists(cwd: str, path: str) -> bool:
-    path = path.encode("latin1").decode("unicode_escape")
+def unescapePath(path: str) -> str:
+    # not sure this is correct
+    return path.encode("latin1").decode("unicode_escape")
+
+
+def escapePath(path: str) -> str:
+    return path.encode("unicode_escape").decode("latin1")
+
+
+def toAbsPathUnescape(cwd: str, path: str) -> str:
+    path = unescapePath(path)
     if not os.path.isabs(path):
         path = os.path.join(cwd, path)
-    return os.path.exists(path)
+    return path
+
+
+def unescapedPathExists(cwd: str, path: str) -> bool:
+    return os.path.exists(toAbsPathUnescape(cwd, path))

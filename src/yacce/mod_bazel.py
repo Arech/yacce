@@ -1,6 +1,7 @@
 import argparse
 import os
 import re
+from rich.progress import Progress
 import sys
 
 from yacce.common import CompilersTuple
@@ -9,12 +10,14 @@ from .common import (
     addCommonCliArgs,
     BaseParser,
     CompileCommand,
+    escapePath,
     LinkCommand,
     kMainDescription,
     LoggingConsole,
     makeCompilersSet,
-    rawPathExists,
     storeJson,
+    toAbsPathUnescape,
+    unescapePath,
 )
 
 
@@ -172,46 +175,148 @@ class BazelParser(BaseParser):
 
     def _update(self) -> None:
         ext_paths: dict[str, str] = {}  # external canonical_name -> realpath
+        extinc_paths: dict[str, str] = {}  # external include paths
         ext_ccs: dict[str, list[CompileCommand]] = {}
         ext_cctimes: dict[str, list[float]] = {}
         # TODO link commands!
 
-        new_cc = []  # new compile_commands for the project only
-        new_cc_time = []
+        new_ccs: list[CompileCommand] = []  # new compile_commands for the project only
+        new_ccs_time: list[float] = []
 
-        r_external = re.compile(r"^(?:\.\/)?external\/([^\/]+)\/")
-        #TODO: generated files such as 'bazel-out/k8-opt/bin/external/xla/xla/xla_data.pb.cc' are
-        # also externals! Validate via output: bazel-out/k8-opt/bin/external/xla/xla/_objs/xla_data_proto_cc_impl/xla_data.pb.pic.o
+        notfound_inc: set[str] = set()
 
-        for ccidx, cc in enumerate(self.compile_commands):
-            cctime = self.compile_cmd_time[ccidx]
-            m_external = r_external.match(cc.tu)
-            if m_external:
-                repo = m_external.group(1)
-                if repo not in ext_paths:
-                    repo_path = os.path.realpath(os.path.join(self._cwd, "external", repo))
-                    if self._test_files and not os.path.isdir(repo_path):
-                        self.Con.warning(
-                            "External repo", repo, "failed existence test at path", repo_path
-                        )
-                    ext_paths[repo] = repo_path
+        # generated files such as 'bazel-out/k8-opt/bin/external/<repo>/..' are also externals!
+        # matches repo part in any external path spec. Not sure leading optional ./ is useful,
+        # haven't seen it, but leaving it just in case
+        r_any_external = re.compile(
+            r"^(?:\.\/)?(?:bazel-[^\/]+\/[^\/]+\/bin\/)?external\/([^\/]+)\/"
+        )
+        # matches a whole external/... part in bazel-..././external/.. path spec
+        r_bazel_external = re.compile(r"^(?:\.\/)?bazel-[^\/]+\/[^\/]+\/bin\/(external\/.+)$")
 
-                ext_ccs.setdefault(repo, []).append(cc)
-                ext_cctimes.setdefault(repo, []).append(cctime)
+        with Progress(console=self.Con) as progress:  # transient=True,
+            task = progress.add_task(
+                "Applying bazel specific transformations to the log...",
+                total=len(self.compile_commands),
+            )
 
-            else:
-                new_cc.append(cc)
-                new_cc_time.append(cctime)
+            for ccidx, cc in enumerate(self.compile_commands):
+                # TODO add progress bar here
 
-        self.Con.debug("externals mapping", ext_paths)
+                cctime = self.compile_cmd_time[ccidx]
+                args, output, tu = cc
+
+                # deciding if this is external
+                m_external = r_any_external.match(tu)
+                if m_external:
+                    repo = m_external.group(1)
+                    if repo not in ext_paths:
+                        repo_path = os.path.realpath(os.path.join(self._cwd, "external", repo))
+                        if self._test_files and not os.path.isdir(repo_path):
+                            self.Con.warning(
+                                "External repo", repo, "doesn't exist at expected path", repo_path
+                            )
+                        ext_paths[repo] = repo_path
+                else:
+                    repo = None
+
+                # checking and updating tu value
+                path = toAbsPathUnescape(self._cwd, tu)
+                if self._test_files and not os.path.isfile(path):
+                    self.Con.warning("Translation unit ", path, "doesn't exist!")
+                tu = escapePath(os.path.realpath(path))
+                # no need to check and update output
+
+                new_args = []
+                next_is_path = False
+                for argidx, arg in enumerate(args):
+                    # resolving symlinks to reduce dependency on bazel's internal workspace structure
+                    if next_is_path:
+                        next_is_path = False
+                        m_ext = r_any_external.match(arg)
+                        if m_ext:
+                            r = m_ext.group(1)
+                            if r not in extinc_paths:
+                                repo_path = os.path.realpath(os.path.join(self._cwd, "external", r))
+                                if self._test_files and not os.path.isdir(repo_path):
+                                    self.Con.warning(
+                                        "External include repo",
+                                        r,
+                                        "doesn't exist at expected path",
+                                        repo_path,
+                                    )
+                                extinc_paths[r] = repo_path
+
+                        path = toAbsPathUnescape(self._cwd, arg)
+                        if self._test_files and not os.path.exists(path):
+                            # ignoring existence test failure for same qualified args starting with bazel-out/k8-opt/bin/external/... dirs
+                            # that exist as just normally qualified external/... args. This seems to be a bazel quirk
+                            err = True
+                            m_bzl_ext = r_bazel_external.match(arg)
+                            if m_bzl_ext:
+                                ext = m_bzl_ext.group(1)
+                                qual = args[argidx - 1]  # can't be negative
+                                # TODO: O(n^2), but maybe will improve later
+                                for ai, a in enumerate(args[1:]):
+                                    if a == ext and qual == args[ai]:  # refs previous args element
+                                        err = False
+                                        break
+
+                            if err:
+                                notfound_inc.add(arg)
+                        arg = escapePath(os.path.realpath(path))
+
+                    elif arg in self.kArgIsPath:
+                        next_is_path = True
+
+                    new_args.append(arg)
+
+                new_cc = CompileCommand(new_args, output, tu)
+                if m_external:
+                    ext_ccs.setdefault(repo, []).append(new_cc)
+                    ext_cctimes.setdefault(repo, []).append(cctime)
+                else:
+                    new_ccs.append(new_cc)
+                    new_ccs_time.append(cctime)
+                progress.advance(task)
+
+        if self.Con.will_log(self.Con.LogLevel.Debug):
+            self.Con.debug(
+                "Compiled dependencies list has",
+                len(ext_paths),
+                "entries:",
+                {k: ext_paths[k] for k in sorted(ext_paths.keys())},
+            )
+            self.Con.debug(
+                "Include dependencies list has",
+                len(extinc_paths),
+                "entries:",
+                {k: extinc_paths[k] for k in sorted(extinc_paths.keys())},
+            )
+
+        ext_paths |= extinc_paths
+        self.Con.info(
+            "External dependencies list has",
+            len(ext_paths),
+            "entries:",
+            {k: ext_paths[k] for k in sorted(ext_paths.keys())},
+        )
+
+        if len(notfound_inc) > 0:
+            self.Con.warning(
+                "These paths are used in compiler includes, but doesn't exist. This might mean the "
+                "build system is misconfigured, or the log file is incomplete, but sometimes it "
+                "just happens and it's fine.",
+                [v for v in sorted(notfound_inc)],
+            )
 
         self._ext_paths = ext_paths
         self._ext_ccs = ext_ccs
         self._ext_cctimes = ext_cctimes
         # TODO link commands!
 
-        self._new_cc = new_cc
-        self._new_cc_time = new_cc_time
+        self._new_cc = new_ccs
+        self._new_cc_time = new_ccs_time
 
     def storeJsons(self, dest_dir: str, save_duration: bool):
         super().storeJsons(dest_dir, save_duration)
@@ -223,7 +328,7 @@ class BazelParser(BaseParser):
             self._cwd,
             "_new",
         )
-        for repo,lst in self._ext_ccs.items():
+        for repo, lst in self._ext_ccs.items():
             storeJson(
                 self.Con,
                 dest_dir,
