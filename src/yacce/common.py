@@ -42,7 +42,7 @@ class LoggingConsole(rich.console.Console):
             kwargs["sep"] = sep
         return super().print(f"[[{color}]{lvl:4s}[/{color}]]{sep}", *args, **kwargs)
 
-    def will_log(self, level)->bool:
+    def will_log(self, level) -> bool:
         return self.log_level <= level
 
     def debug(self, *args, **kwargs):
@@ -237,6 +237,17 @@ class BaseParser:
         # greedy match [] with any chars inside of ""
         self._r_in_braces = re.compile(r"^\[(?:(?:[, ])*\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")*\]")
 
+        """ from https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html:
+        Options in file are separated by whitespace. A whitespace character may be included
+        in an option by surrounding the entire option in either single or double quotes.
+        Any character (including a backslash) may be included by prefixing the character to
+        be included with a backslash. The file may itself contain additional @file options;
+        any such options will be processed recursively."""
+        # self.Con.debug("@file", args[i],"  -->  ", file_content)
+        self._r_options = re.compile(
+            r"([^\s'\"]+|'(?:(?:[^']*\\'|[^']*)*)'|\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")(?:\s+|$)"
+        )
+
         self._parseLog(log_file)
 
     def _parseLog(self, log_file: str) -> None:
@@ -245,7 +256,10 @@ class BaseParser:
             r"(?P<pid>\d+) (?P<unix_ts>\d+)\.(?P<unix_ts_ms>\d+) (?P<call>execve|execveat|\+\+\+ exited with (?P<exit_code>\d+) \+\+\+)"
         )
 
-        # with open(log_file, "r") as file:
+        # maps translation_unit->{output: args_str} to verify that commands are unique
+        self._seen_compile: dict[str, dict[str, str]] = {}
+        self._seen_link: dict[str, str] = {}  # just output->args_str
+
         with rich.progress.open(
             log_file, "r", description="Parsing strace log file...", console=self.Con
         ) as file:
@@ -278,6 +292,10 @@ class BaseParser:
             self.Con.warning(
                 "No compiler invocation were found in the log. If you're using a custom compiler, pass it in --compiler option."
             )
+
+        # cleanup
+        self._seen_compile = None
+        self._seen_link = None
 
     def _handleExit(self, pid: int, ts: float, exit_code: str | None, line_num: int) -> None:
         # negative exit code means the process termination was not found in the log
@@ -375,6 +393,7 @@ class BaseParser:
         # scope the search to the inside of the braces only
         args = re.findall(self._r_in_quotes, args_str)
         assert len(args) > 1
+        args = self._expand_at_file(args, line_num, pid)
 
         # now walking over the args and checking existence of those that we know to be files or dirs.
         # Also getting arguments of -o and -c options, if they are present
@@ -385,7 +404,6 @@ class BaseParser:
         arg_output = None
         for arg in args:
             # TODO argument blacklist
-            # TODO @file extension
             if next_is_path:
                 next_is_path = False
                 if self._test_files and not unescapedPathExists(self._cwd, arg):
@@ -445,34 +463,133 @@ class BaseParser:
             )
             return
 
-        #####
-        # quick check if for each path argument that starts with external there exist a corresponding argument that starts with bazel-out/k8-opt/bin/external
-        """for arg in args:
-            if arg.startswith("external/") and not arg.endswith((".cpp",".c",".cc",".S")):
-                found=False
-                rMatch=re.compile(r"^bazel-out/[^\/]+/bin/" + re.escape(arg)+"$")
-                for a in args:
-                    if rMatch.match(a):
-                        found = True
-                        break
-                if not found:
-                    Con.warning(f"Line {line_idx}, pid {pid}: no alternative for {arg}")
-                    """
-        #####
-
         # TODO: do we need to fix the first argument in args to be the same as the one used in
         # execve()? It might be different depending how execve() was called.
 
+        arg_str = " ".join(args)
         if is_link:
+            if self._check_same_link(arg_str, arg_output):
+                return
             self.link_commands.append(LinkCommand(args, arg_output))
             cmd_idx = len(self.link_cmd_time)
             self.link_cmd_time.append(0.0)
         else:
+            if self._check_same_compile(arg_str, arg_output, arg_compile):
+                return
             self.compile_commands.append(CompileCommand(args, arg_output, arg_compile))
             cmd_idx = len(self.compile_cmd_time)
             self.compile_cmd_time.append(0.0)
 
         self._running_pids[pid] = ProcessProps(ts, line_num, is_link, cmd_idx)
+
+    def _expand_at_file(self, args: list[str], line_num: int, pid: int) -> list[str]:
+        at_idxs = [i for i, s in enumerate(args) if s.startswith("@")]
+        added = 0
+        for i in at_idxs:
+            fname = toAbsPathUnescape(self._cwd, args[i][1:])
+            if os.path.isfile(fname):
+                fsize = os.path.getsize(fname)
+                if fsize > 64 * 1024:  # randomly sufficient threshold
+                    self.Con.warning(
+                        f"Line {line_num}: pid {pid} has @file argument#{i} '{args[i]}' that "
+                        "points to a file of size",
+                        fsize,
+                        ". That seems a bit too much, perhaps something is wrong?",
+                    )
+                with open(fname, "r") as file:
+                    file_content = file.read()
+                # self.Con.debug("@file", args[i], "  -->  ", file_content)
+                newargs = []
+                ofs = 0
+                m = self._r_options.match(file_content)
+                while m:
+                    newargs.append(m.group(1))
+                    ofs += m.end()
+                    m = self._r_options.match(file_content[ofs:])
+                if len(file_content) != ofs:
+                    self.Con.error(
+                        f"Line {line_num}: pid {pid} has @file argument#{i} '{args[i]}' "
+                        "parsing of which ended prematurely."
+                    )
+                # self.Con.debug(newargs)
+                ni = added + i
+                added += len(newargs) - 1
+                args[ni:ni] = newargs
+                del args[added + i + 1]
+                #self.Con.debug(args)
+
+            else:
+                self.Con.error(
+                    f"Line {line_num}: pid {pid} has @file argument#{i} '{args[i]}' that doesn't "
+                    "reference existing file. Can't read it and hence the processing won't be "
+                    "correct."
+                )
+                # do nothing
+        return args
+
+    def _check_same_compile(self, arg_str: str, arg_output: str, arg_compile: str) -> bool:
+        if arg_compile in self._seen_compile:
+            outp = self._seen_compile[arg_compile]
+            if arg_output in outp:
+                if arg_str == outp[arg_output]:
+                    self.Con.warning(
+                        "For translation unit '",
+                        arg_compile,
+                        "' the same output",
+                        arg_output,
+                        "is produced by the second instance of the ~same compilation command '",
+                        arg_str,
+                        "'. This might be benign, but this isn't normal for a correct build system. "
+                        "Resulting compile_commands.json will contain only one command.",
+                    )
+                    return True
+                else:
+                    self.Con.error(
+                        "For translation unit '",
+                        arg_compile,
+                        "' the same output",
+                        arg_output,
+                        "is generated by different compilation commands: the first recorded was '",
+                        outp[arg_output],
+                        "' and now it's '",
+                        arg_str,
+                        "'. This isn't normal and most likely means that several build systems were "
+                        "executed. Resulting link_commands.json will contain both, and most likely "
+                        "will not be valid",
+                    )
+            else:
+                outp[arg_output] = arg_str
+        else:
+            self._seen_compile[arg_compile] = {arg_output: arg_str}
+        return False
+
+    def _check_same_link(self, arg_str: str, arg_output: str) -> bool:
+        if arg_output in self._seen_link:
+            if arg_str == self._seen_link[arg_output]:
+                self.Con.warning(
+                    "The same output",
+                    arg_output,
+                    "is produced by the second instance of the same link command '",
+                    arg_str,
+                    "'. This might be benign, but this isn't normal for a correct build system. "
+                    "Resulting link_commands.json will contain only one command.",
+                )
+                return True
+            else:
+                self.Con.error(
+                    "The same output",
+                    arg_output,
+                    "is generated by different link commands: the first recorded was '",
+                    self._seen_link[arg_output],
+                    "' and now it's '",
+                    arg_str,
+                    "'. This isn't normal and most likely means that several build systems were "
+                    "executed. Resulting link_commands.json will contain both, and most likely "
+                    "will not be valid",
+                )
+        else:
+            self._seen_link[arg_output] = arg_str
+        return False
 
     def storeJsons(self, dest_dir: str, save_duration: bool):
         storeJson(

@@ -304,7 +304,9 @@ class BazelParser(BaseParser):
 
         if len(notfound_inc) > 0:
             self.Con.warning(
-                "These paths are used in compiler includes, but doesn't exist. This might mean the "
+                "These",
+                len(notfound_inc),
+                "paths are used in compiler includes, but doesn't exist. This might mean the "
                 "build system is misconfigured, or the log file is incomplete, but sometimes it "
                 "just happens and it's fine.",
                 [v for v in sorted(notfound_inc)],
