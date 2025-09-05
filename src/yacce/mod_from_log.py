@@ -65,7 +65,7 @@ def _getArgs(
     args = parser.parse_args(unparsed_args, namespace=args)
 
     if args.log_file is None or not os.path.isfile(args.log_file):
-        raise YacceException("Log file is not specified or does not exist.")
+        raise YacceException(f"Log file '{args.log_file}' is not specified or does not exist.")
 
     args = _fixCwdArg(Con, args)
     setattr(args, "compiler", makeCompilersSet(args.compiler))

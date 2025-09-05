@@ -93,6 +93,7 @@ ipython_config.py
 # Environments
 /.venv
 /venv*/
+/mantest
 
 # Spyder project settings
 .spyderproject

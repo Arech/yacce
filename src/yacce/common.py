@@ -114,7 +114,7 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         help="If set, will also generate link_commands.json (in a similar format to "
         "compile_commands, but for linking. Useful to get some insights). Default: %(default)s",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
     )
 
     parser.add_argument(
@@ -123,7 +123,7 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         "seconds with microsecond resolution. Have no automated use, but can be inspected manually, or with a custom "
         "script to obtain build system performance insights. Default: %(default)s",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
     )
 
     parser.add_argument(
@@ -199,6 +199,33 @@ class BaseParser:
         "-cxx-isystem",
     ))
 
+    # If any of these arguments present in a compiler invocation, then the whole invocation should
+    # be ignored (information querying arguments)
+    # isolated dash is for compilation from stdin - there's nothing we can do with it
+    kArgToIgnoreInvocation = frozenset(("--version", "-"))
+    # when there's only one arg and it matches anything below, ignore the invocation
+    kSoleArgToIgnoreInvocation = frozenset(("-v",))
+    # if an arg starts with these substring, the invocation will be ignored
+    kArgStartsWithIgnoreInvocation = ("-print", "--print")
+    # with the exception of the below args
+    kArgStartsWithIgnoreInvocationException = ("--print-missing-file-dependencies",)
+
+    # greedy match repeatedly blocks ending on escaped quote \" literal, or that doesn't contain
+    # quotes at all until first unescaped quote
+    _r_in_quotes = re.compile(r"\"((?:[^\"]*\\\"|[^\"]*)*)\"")
+    # greedy match [] with any chars inside of ""
+    _r_in_braces = re.compile(r"^\[(?:(?:[, ])*\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")*\]")
+
+    """ from https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html:
+    Options in file are separated by whitespace. A whitespace character may be included
+    in an option by surrounding the entire option in either single or double quotes.
+    Any character (including a backslash) may be included by prefixing the character to
+    be included with a backslash. The file may itself contain additional @file options;
+    any such options will be processed recursively."""
+    _r_options = re.compile(
+        r"([^\s'\"]+|'(?:(?:[^']*\\'|[^']*)*)'|\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")(?:\s+|$)"
+    )
+
     def __init__(
         self,
         Con: LoggingConsole,
@@ -230,23 +257,6 @@ class BaseParser:
         self.link_commands: list[LinkCommand] = []
         self.link_cmd_time: list[float] = []
         # errors = {} # error_code -> array of line_idx where it happened
-
-        # greedy match repeatedly blocks ending on escaped quote \" literal, or that doesn't contain
-        # quotes at all until first unescaped quote
-        self._r_in_quotes = re.compile(r"\"((?:[^\"]*\\\"|[^\"]*)*)\"")
-        # greedy match [] with any chars inside of ""
-        self._r_in_braces = re.compile(r"^\[(?:(?:[, ])*\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")*\]")
-
-        """ from https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html:
-        Options in file are separated by whitespace. A whitespace character may be included
-        in an option by surrounding the entire option in either single or double quotes.
-        Any character (including a backslash) may be included by prefixing the character to
-        be included with a backslash. The file may itself contain additional @file options;
-        any such options will be processed recursively."""
-        # self.Con.debug("@file", args[i],"  -->  ", file_content)
-        self._r_options = re.compile(
-            r"([^\s'\"]+|'(?:(?:[^']*\\'|[^']*)*)'|\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")(?:\s+|$)"
-        )
 
         self._parseLog(log_file)
 
@@ -294,8 +304,8 @@ class BaseParser:
             )
 
         # cleanup
-        self._seen_compile = None
-        self._seen_link = None
+        del self._seen_compile
+        del self._seen_link
 
     def _handleExit(self, pid: int, ts: float, exit_code: str | None, line_num: int) -> None:
         # negative exit code means the process termination was not found in the log
@@ -392,8 +402,10 @@ class BaseParser:
         # In a sense, it's a duplication of application of the same regexp as above, but we must
         # scope the search to the inside of the braces only
         args = re.findall(self._r_in_quotes, args_str)
-        assert len(args) > 1
-        args = self._expand_at_file(args, line_num, pid)
+
+        if self._shouldIgnoreInvocation(args, line_num, pid, args_str):
+            return
+        args = self._expandAtFile(args, line_num, pid)
 
         # now walking over the args and checking existence of those that we know to be files or dirs.
         # Also getting arguments of -o and -c options, if they are present
@@ -449,6 +461,12 @@ class BaseParser:
                 pass"""
 
         # checking if it's a linking command (heuristic: if it contains -o and no -c)
+        # https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html
+        # BUGBUG -c just tells compile, but not link! An input file / translation unit is any file
+        # having a proper extension, or any extension with a prior '-x' argument excluding files
+        # after such flags as: -main-file-name. Also there might be several TU in a single call, - each independent
+        # BUGBUG -o have default values!
+
         has_output = arg_output is not None
         is_compile = arg_compile is not None
         is_link = not is_compile
@@ -463,18 +481,24 @@ class BaseParser:
             )
             return
 
+        if arg_output == "/dev/null":  # TODO: could this be moved into kArgToIgnoreInvocation ?
+            self.Con.debug(
+                f"Line{line_num} pid{pid}: invocation '{args_str}' is ignored due to -o /dev/null"
+            )
+            return
+
         # TODO: do we need to fix the first argument in args to be the same as the one used in
         # execve()? It might be different depending how execve() was called.
 
         arg_str = " ".join(args)
         if is_link:
-            if self._check_same_link(arg_str, arg_output):
+            if self._checkSameLink(arg_str, arg_output):
                 return
             self.link_commands.append(LinkCommand(args, arg_output))
             cmd_idx = len(self.link_cmd_time)
             self.link_cmd_time.append(0.0)
         else:
-            if self._check_same_compile(arg_str, arg_output, arg_compile):
+            if self._checkSameCompile(arg_str, arg_output, arg_compile):
                 return
             self.compile_commands.append(CompileCommand(args, arg_output, arg_compile))
             cmd_idx = len(self.compile_cmd_time)
@@ -482,7 +506,42 @@ class BaseParser:
 
         self._running_pids[pid] = ProcessProps(ts, line_num, is_link, cmd_idx)
 
-    def _expand_at_file(self, args: list[str], line_num: int, pid: int) -> list[str]:
+    def _shouldIgnoreInvocation(
+        self, args: list[str], line_num: int, pid: int, args_str: str
+    ) -> bool:
+        args_len = len(args)
+        if args_len <= 1:
+            self.Con.error(
+                f"Line{line_num} pid{pid}: invocation of a compiler '{args_str}' doesn't have arguments. Ignoring it",
+            )
+            return True
+
+        if args_len == 2 and args[1] in self.kSoleArgToIgnoreInvocation:
+            self.Con.debug(
+                f"Line{line_num} pid{pid}: invocation '{args_str}' is ignored due to a sole arg in kSoleArgToIgnoreInvocation"
+            )
+            return True
+
+        if any(1 for a in args if a in self.kArgToIgnoreInvocation):
+            self.Con.debug(
+                f"Line{line_num} pid{pid}: invocation '{args_str}' is ignored due to an arg in kArgToIgnoreInvocation"
+            )
+            return True
+
+        if any(
+            1
+            for a in args
+            if a.startswith(self.kArgStartsWithIgnoreInvocation)
+            and a not in self.kArgStartsWithIgnoreInvocationException
+        ):
+            self.Con.debug(
+                f"Line{line_num} pid{pid}: invocation '{args_str}' is ignored due to an arg satisfying kArgStartsWithIgnoreInvocation"
+            )
+            return True
+
+        return False
+
+    def _expandAtFile(self, args: list[str], line_num: int, pid: int) -> list[str]:
         at_idxs = [i for i, s in enumerate(args) if s.startswith("@")]
         added = 0
         for i in at_idxs:
@@ -516,7 +575,7 @@ class BaseParser:
                 added += len(newargs) - 1
                 args[ni:ni] = newargs
                 del args[added + i + 1]
-                #self.Con.debug(args)
+                # self.Con.debug(args)
 
             else:
                 self.Con.error(
@@ -527,7 +586,7 @@ class BaseParser:
                 # do nothing
         return args
 
-    def _check_same_compile(self, arg_str: str, arg_output: str, arg_compile: str) -> bool:
+    def _checkSameCompile(self, arg_str: str, arg_output: str, arg_compile: str) -> bool:
         if arg_compile in self._seen_compile:
             outp = self._seen_compile[arg_compile]
             if arg_output in outp:
@@ -563,7 +622,7 @@ class BaseParser:
             self._seen_compile[arg_compile] = {arg_output: arg_str}
         return False
 
-    def _check_same_link(self, arg_str: str, arg_output: str) -> bool:
+    def _checkSameLink(self, arg_str: str, arg_output: str) -> bool:
         if arg_output in self._seen_link:
             if arg_str == self._seen_link[arg_output]:
                 self.Con.warning(
