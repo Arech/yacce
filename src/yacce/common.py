@@ -178,9 +178,11 @@ def makeCompilersSet(custom_compilers: list[str] | None) -> CompilersTuple:
 # line_num:int is the number (1 based index) of line in the log that spawned the process
 # is_link:bool is the command is link command
 # cmd_idx:int is the index of command in a corresponding list
-ProcessProps = namedtuple("ProcessProps", ("start_ts_us", "line_num", "is_link", "cmd_idx"))
-# args:list[str], output:str, tu:str (translation unit)
-CompileCommand = namedtuple("CompileCommand", ("args", "output", "tu"))
+ProcessProps = namedtuple(
+    "ProcessProps", ("start_ts_us", "line_num", "is_link", "cmd_idx", "n_sources")
+)
+# args:list[str], output:str, source:str
+CompileCommand = namedtuple("CompileCommand", ("args", "output", "source"))
 LinkCommand = namedtuple("LinkCommand", ("args", "output"))
 
 
@@ -189,7 +191,6 @@ class BaseParser:
     # list of a compiler arguments that should contain a file/dir path
     kArgIsPath = frozenset((
         "-o",
-        "-c",
         "-I",
         "--include-directory",
         "-isystem",
@@ -198,6 +199,32 @@ class BaseParser:
         "--sysroot",
         "-cxx-isystem",
     ))
+
+    # To properly find source files in compiler's args, we have to implement a complete args parser,
+    # which is infeasible. We use an extension/suffix based heuristic and a flags blacklist instead.
+    # Set of extensions by which we find source files in compiler's arguments
+    # https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html
+    # TODO: add all here, otherwise they go to link cmds
+    kExtOfSource = (
+        ".c",
+        ".i",
+        ".ii",
+        ".m",
+        ".mi",
+        ".mm",
+        ".M",
+        ".mii",
+        ".cc",
+        ".cp",
+        ".cxx",
+        ".cpp",
+        ".CPP",
+        ".c++",
+        ".C",
+    )
+
+    # if a path/file argument is preceded by any of the following flags, the arg is not a source
+    kArgIsNotSource = frozenset(("-main-file-name",))
 
     # If any of these arguments present in a compiler invocation, then the whole invocation should
     # be ignored (information querying arguments)
@@ -212,24 +239,6 @@ class BaseParser:
 
     # greedy match repeatedly blocks ending on escaped quote \" literal, or that doesn't contain
     # quotes at all until first unescaped quote
-    @staticmethod
-    def _makeRInQuotesOLD(capture_inner: bool, no_begin_end: bool) -> str:
-        not_word_backslash = r"(?<=\W)(?<!\\)"
-        return (
-            # either start of string, or NOT a word, or not a backslash
-            (not_word_backslash if no_begin_end else r"(?:^|" + not_word_backslash + ")")
-            + r'"'
-            + ("(" if capture_inner else "(?:")
-            + r"""
-            (?:[^"]*(?:\\")*)*  # any sequence of not quotes and escaped quotes
-            (?<!\\)   # no escaping backslash in front of the ending quote
-            )     # end of capture/group
-            "        # ending quote
-            """
-            # after the quote either end of string, or NOT a word
-            + (r"(?=\W)" if no_begin_end else r"(?:$|(?=\W))")
-        )
-
     @staticmethod
     def _makeRInQuotes(capture_inner: bool, no_begin_end: bool) -> str:
         not_word_backslash = r"(?<=\W)(?<!\\)"
@@ -368,7 +377,7 @@ class BaseParser:
 
     def _handleExit(self, pid: int, ts: float, exit_code: str | None, line_num: int) -> None:
         # negative exit code means the process termination was not found in the log
-        (start_ts, start_line_num, is_link, cmd_idx) = self._running_pids[pid]
+        (start_ts, start_line_num, is_link, cmd_idx, n_sources) = self._running_pids[pid]
 
         is_exit_logged = line_num > 0
         if is_exit_logged:  # <=0 line_idx is used when we didn't find the process exit in the log
@@ -404,7 +413,7 @@ class BaseParser:
         if is_link:
             self.link_cmd_time[cmd_idx] = duration
         else:
-            self.compile_cmd_time[cmd_idx] = duration
+            self.compile_cmd_time[cmd_idx : cmd_idx + n_sources] = [duration] * n_sources
 
         del self._running_pids[pid]
 
@@ -469,13 +478,13 @@ class BaseParser:
         args = self._expandAtFile(args, line_num, pid)
 
         # now walking over the args and checking existence of those that we know to be files or dirs.
-        # Also getting arguments of -o and -c options, if they are present
+        # Also getting arguments of some important options, if they are present
         next_is_path = False
         next_is_output = False
-        next_is_compile = False
-        arg_compile = None
         arg_output = None
-        for arg in args:
+        sources = []
+        # is_sources=True # to track -x/--language toggles TODO
+        for idx, arg in enumerate(args):
             # TODO argument blacklist
             if next_is_path:
                 next_is_path = False
@@ -486,14 +495,6 @@ class BaseParser:
                         "or the log file is incomplete and hence so is the resulting compile_commands.json. "
                         f"Full command args are: {args_str}"
                     )
-                if next_is_compile:
-                    next_is_compile = False
-                    if arg_compile is not None:
-                        self.Con.warning(
-                            f"Line {line_num}: pid {pid} made call {call} with multiple -c options. "
-                            f"This is unusual, taking the last one. Full command args are: {args_str}"
-                        )
-                    arg_compile = arg  # it's already escaped
                 if next_is_output:
                     next_is_output = False
                     if arg_output is not None:
@@ -506,8 +507,12 @@ class BaseParser:
                 next_is_path = True
                 if arg == "-o":
                     next_is_output = True
-                elif arg == "-c":
-                    next_is_compile = True
+            elif (
+                arg.endswith(self.kExtOfSource)
+                and idx > 0
+                and args[idx - 1] not in self.kArgIsNotSource
+            ):
+                sources.append(arg)
             # TODO parsing combined args like --sysroot=/path
             """elif do_test_files and arg.startswith((
                 "-I",
@@ -521,16 +526,13 @@ class BaseParser:
                 # TODO
                 pass"""
 
-        # checking if it's a linking command (heuristic: if it contains -o and no -c)
-        # https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html
-        # BUGBUG -c just tells compile, but not link! An input file / translation unit is any file
-        # having a proper extension, or any extension with a prior '-x' argument excluding files
-        # after such flags as: -main-file-name. Also there might be several TU in a single call, - each independent
+        n_sources = len(sources)
+        if n_sources>1:
+            self.Con.warning(f"Line{line_num} pid{pid}: invocation '{args_str}' has {n_sources} sources")
         # BUGBUG -o have default values!
 
         has_output = arg_output is not None
-        is_compile = arg_compile is not None
-        is_link = not is_compile
+        is_link = n_sources == 0
 
         if not self._do_link and is_link:
             return  # not interested in linking commands
@@ -559,13 +561,14 @@ class BaseParser:
             cmd_idx = len(self.link_cmd_time)
             self.link_cmd_time.append(0.0)
         else:
-            if self._checkSameCompile(arg_str, arg_output, arg_compile):
-                return
-            self.compile_commands.append(CompileCommand(args, arg_output, arg_compile))
             cmd_idx = len(self.compile_cmd_time)
-            self.compile_cmd_time.append(0.0)
+            for src in sources:
+                if self._checkSameCompile(arg_str, arg_output, src):
+                    return
+                self.compile_commands.append(CompileCommand(args, arg_output, src))
+                self.compile_cmd_time.append(0.0)
 
-        self._running_pids[pid] = ProcessProps(ts, line_num, is_link, cmd_idx)
+        self._running_pids[pid] = ProcessProps(ts, line_num, is_link, cmd_idx, n_sources)
 
     def _shouldIgnoreInvocation(
         self, args: list[str], line_num: int, pid: int, args_str: str

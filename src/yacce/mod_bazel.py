@@ -204,10 +204,10 @@ class BazelParser(BaseParser):
                 # TODO add progress bar here
 
                 cctime = self.compile_cmd_time[ccidx]
-                args, output, tu = cc
+                args, output, source = cc
 
                 # deciding if this is external
-                m_external = r_any_external.match(tu)
+                m_external = r_any_external.match(source)
                 if m_external:
                     repo = m_external.group(1)
                     if repo not in ext_paths:
@@ -220,11 +220,11 @@ class BazelParser(BaseParser):
                 else:
                     repo = None
 
-                # checking and updating tu value
-                path = toAbsPathUnescape(self._cwd, tu)
+                # checking and updating the source path
+                path = toAbsPathUnescape(self._cwd, source)
                 if self._test_files and not os.path.isfile(path):
                     self.Con.warning("Translation unit ", path, "doesn't exist!")
-                tu = escapePath(os.path.realpath(path))
+                source = escapePath(os.path.realpath(path))
                 # no need to check and update output
 
                 new_args = []
@@ -271,7 +271,7 @@ class BazelParser(BaseParser):
 
                     new_args.append(arg)
 
-                new_cc = CompileCommand(new_args, output, tu)
+                new_cc = CompileCommand(new_args, output, source)
                 if m_external:
                     ext_ccs.setdefault(repo, []).append(new_cc)
                     ext_cctimes.setdefault(repo, []).append(cctime)
