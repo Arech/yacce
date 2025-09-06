@@ -213,7 +213,7 @@ class BaseParser:
     # greedy match repeatedly blocks ending on escaped quote \" literal, or that doesn't contain
     # quotes at all until first unescaped quote
     @staticmethod
-    def _makeRInQuotes(capture_inner: bool, no_begin_end: bool) -> str:
+    def _makeRInQuotesOLD(capture_inner: bool, no_begin_end: bool) -> str:
         not_word_backslash = r"(?<=\W)(?<!\\)"
         return (
             # either start of string, or NOT a word, or not a backslash
@@ -225,6 +225,24 @@ class BaseParser:
             (?<!\\)   # no escaping backslash in front of the ending quote
             )     # end of capture/group
             "        # ending quote
+            """
+            # after the quote either end of string, or NOT a word
+            + (r"(?=\W)" if no_begin_end else r"(?:$|(?=\W))")
+        )
+
+    @staticmethod
+    def _makeRInQuotes(capture_inner: bool, no_begin_end: bool) -> str:
+        not_word_backslash = r"(?<=\W)(?<!\\)"
+        return (
+            # either start of string, or NOT a word, or not a backslash
+            (not_word_backslash if no_begin_end else r"(?:^|" + not_word_backslash + ")")
+            + r"(?P<quote>['\"])"  # starting quote
+            + ("(" if capture_inner else "(?:")
+            + r"""
+            (?:(?:(?!(?P=quote)).)*(?:\\(?P=quote))*)*  # any sequence of not quotes and escaped quotes
+            (?<!\\)         # no escaping backslash in front of the ending quote
+            )               # end of capture/group
+            (?P=quote)      # ending quote
             """
             # after the quote either end of string, or NOT a word
             + (r"(?=\W)" if no_begin_end else r"(?:$|(?=\W))")
@@ -243,11 +261,19 @@ class BaseParser:
     Any character (including a backslash) may be included by prefixing the character to
     be included with a backslash. The file may itself contain additional @file options;
     any such options will be processed recursively."""
-    #_r_options = re.compile(
+    # _r_options = re.compile(
     #    r"([^\s'\"]+|'(?:(?:[^']*\\'|[^']*)*)'|\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")(?:\s+|$)"
-    #)
+    # )
     _r_options = re.compile(
-        r"([^\s'\"]+|'(?:(?:[^']*\\'|[^']*)*)'|\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")(?:\s+|$)"
+        r"""\s*
+        (?:
+        ([^\s'\"]+) |
+        (?:"""
+        + _makeRInQuotes(True, True)
+        + r""")
+        )
+        (?:\s+|$)""",
+        re.VERBOSE | re.DEBUG,
     )
 
     def __init__(
@@ -330,9 +356,9 @@ class BaseParser:
                 "No compiler invocation were found in the log. If you're using a custom compiler, pass it in --compiler option."
             )
         else:
-            self.Con.info(n_cc,"compilation commands found")
+            self.Con.info(n_cc, "compilation commands found")
             if self._do_link:
-                self.Con.info(n_lc,"link commands found")
+                self.Con.info(n_lc, "link commands found")
 
         # cleanup
         del self._seen_compile
@@ -406,7 +432,7 @@ class BaseParser:
         )
 
         # unescaping quotes and other symbols.
-        compiler_path = unescapePath(match_filepath.group(1))
+        compiler_path = unescapePath(match_filepath.group(2))
         if (
             compiler_path not in self._compilers.fullpaths
             and os.path.basename(compiler_path) not in self._compilers.basenames
@@ -434,6 +460,7 @@ class BaseParser:
         # In a sense, it's a duplication of application of the same regexp as above, but we must
         # scope the search to the inside of the braces only
         args = re.findall(self._r_in_quotes, args_str)
+        args = [inner for _,inner in args]
 
         if self._shouldIgnoreInvocation(args, line_num, pid, args_str):
             return
@@ -597,7 +624,9 @@ class BaseParser:
                 # miss bugs
                 m = self._r_options.match(file_content)
                 while m:
-                    newargs.append(m.group(1))
+                    noq, inq = m.group(1, 3)
+                    assert int(noq is None) + int(inq is None) == 1
+                    newargs.append(noq if noq is not None else inq)
                     ofs += m.end()
                     m = self._r_options.match(file_content[ofs:])
                 if len(file_content) != ofs:
