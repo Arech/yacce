@@ -212,9 +212,30 @@ class BaseParser:
 
     # greedy match repeatedly blocks ending on escaped quote \" literal, or that doesn't contain
     # quotes at all until first unescaped quote
-    _r_in_quotes = re.compile(r"\"((?:[^\"]*\\\"|[^\"]*)*)\"")
+    @staticmethod
+    def _makeRInQuotes(capture_inner: bool, no_begin_end: bool) -> str:
+        not_word_backslash = r"(?<=\W)(?<!\\)"
+        return (
+            # either start of string, or NOT a word, or not a backslash
+            (not_word_backslash if no_begin_end else r"(?:^|" + not_word_backslash + ")")
+            + r'"'
+            + ("(" if capture_inner else "(?:")
+            + r"""
+            (?:[^"]*(?:\\")*)*  # any sequence of not quotes and escaped quotes
+            (?<!\\)   # no escaping backslash in front of the ending quote
+            )     # end of capture/group
+            "        # ending quote
+            """
+            # after the quote either end of string, or NOT a word
+            + (r"(?=\W)" if no_begin_end else r"(?:$|(?=\W))")
+        )
+
+    _r_in_quotes = re.compile(_makeRInQuotes(True, False), re.VERBOSE)
     # greedy match [] with any chars inside of ""
-    _r_in_braces = re.compile(r"^\[(?:(?:[, ])*\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")*\]")
+    _r_in_braces = re.compile(r"^\[(?:[, ]*" + _makeRInQuotes(False, True) + r")*\]", re.VERBOSE)
+    # note that dependency of _r_in_braces on essentially _r_in_quotes definition is important as
+    # it allows to produce a string on which we can safely match individual arguments with _r_in_quotes.findall()
+    # in a batch, instead one by one to ensure correctness of parsing.
 
     """ from https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html:
     Options in file are separated by whitespace. A whitespace character may be included
@@ -222,6 +243,9 @@ class BaseParser:
     Any character (including a backslash) may be included by prefixing the character to
     be included with a backslash. The file may itself contain additional @file options;
     any such options will be processed recursively."""
+    #_r_options = re.compile(
+    #    r"([^\s'\"]+|'(?:(?:[^']*\\'|[^']*)*)'|\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")(?:\s+|$)"
+    #)
     _r_options = re.compile(
         r"([^\s'\"]+|'(?:(?:[^']*\\'|[^']*)*)'|\"(?:(?:[^\"]*\\\"|[^\"]*)*)\")(?:\s+|$)"
     )
@@ -263,7 +287,7 @@ class BaseParser:
     def _parseLog(self, log_file: str) -> None:
         # match the start of the log string: (<pid>) (<time.stamp>) (execve|execveat|exited...)
         r_exec_or_exit = re.compile(
-            r"(?P<pid>\d+) (?P<unix_ts>\d+)\.(?P<unix_ts_ms>\d+) (?P<call>execve|execveat|\+\+\+ exited with (?P<exit_code>\d+) \+\+\+)"
+            r"^(?P<pid>\d+)\s+(?P<unix_ts>\d+)\.(?P<unix_ts_ms>\d+)\s+(?P<call>execve|execveat|\+\+\+ exited with (?P<exit_code>\d+) \+\+\+)"
         )
 
         # maps translation_unit->{output: args_str} to verify that commands are unique
@@ -274,6 +298,7 @@ class BaseParser:
             log_file, "r", description="Parsing strace log file...", console=self.Con
         ) as file:
             for line_idx, line in enumerate(file):
+                # TODO: handling line continuations
                 match_exec_or_exit = r_exec_or_exit.match(line)
                 if not match_exec_or_exit:
                     continue  # nothing to do here
@@ -298,10 +323,16 @@ class BaseParser:
             self._handleExit(pid, 0.0, None, 0)
 
         assert 0 == len(self._running_pids)
-        if len(self.compile_commands) == 0 and len(self.link_commands) == 0:
+        n_cc = len(self.compile_commands)
+        n_lc = len(self.link_commands)
+        if n_cc == 0 and n_lc == 0:
             self.Con.warning(
                 "No compiler invocation were found in the log. If you're using a custom compiler, pass it in --compiler option."
             )
+        else:
+            self.Con.info(n_cc,"compilation commands found")
+            if self._do_link:
+                self.Con.info(n_lc,"link commands found")
 
         # cleanup
         del self._seen_compile
@@ -370,12 +401,12 @@ class BaseParser:
         # extract the first argument of execve, which is the executable path
         match_filepath = self._r_in_quotes.match(line[1:])
         assert match_filepath, (
-            f"Line {line_num}: pid {pid} made call {call} but the executable path argument couldn't be parsed. "
-            "This might mean the log file is malformed or the regexp is incorrect"
+            f"Line {line_num}: pid {pid} made call {call} but the argument '{line}' can't be parsed. "
+            "The log file is malformed or _r_in_quotes regexp is incorrect"
         )
 
-        # unescaping quotes and other symbols. Not 100% sure that latin1 is a correct choice
-        compiler_path = match_filepath.group(1).encode("latin1").decode("unicode_escape")
+        # unescaping quotes and other symbols.
+        compiler_path = unescapePath(match_filepath.group(1))
         if (
             compiler_path not in self._compilers.fullpaths
             and os.path.basename(compiler_path) not in self._compilers.basenames
@@ -384,7 +415,8 @@ class BaseParser:
 
         # finding execv() args in the rest of the line
         args_start_pos = match_filepath.end() + 3
-        assert line[match_filepath.end() + 1 : args_start_pos + 1].startswith(", ["), (
+        # +1 since match_filepath is matched on args[1:]
+        assert line[match_filepath.end() + 1 : args_start_pos + 1] == ", [", (
             f"Unexpected format of the {call} syscall in the log file"
         )
         # we can't simply search for the closing ] because there might be braces in file names and
@@ -392,7 +424,7 @@ class BaseParser:
         match_args = self._r_in_braces.match(line[args_start_pos:])
         assert match_args, (
             f"Line {line_num}: pid {pid} made call {call} but the arguments array couldn't be parsed. "
-            "This might mean the log file is malformed or rInBraces regexp is incorrect"
+            "The log file is malformed or _r_in_braces regexp is incorrect"
         )
 
         args_str = match_args.group()
@@ -560,6 +592,9 @@ class BaseParser:
                 # self.Con.debug("@file", args[i], "  -->  ", file_content)
                 newargs = []
                 ofs = 0
+                # have to sequentially match one after the other to ensure everything is parsed as
+                # expected. Doing .findall() will just skip parts that don't match and this would
+                # miss bugs
                 m = self._r_options.match(file_content)
                 while m:
                     newargs.append(m.group(1))
@@ -571,6 +606,9 @@ class BaseParser:
                         "parsing of which ended prematurely."
                     )
                 # self.Con.debug(newargs)
+                newargs = self._expandAtFile(newargs, line_num, pid)  # recursive expansion
+                # ^^ might produce puzzling messages, but that's a TODO for later
+
                 ni = added + i
                 added += len(newargs) - 1
                 args[ni:ni] = newargs
