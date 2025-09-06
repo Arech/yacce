@@ -237,7 +237,9 @@ class BaseParser:
             # either start of string, or NOT a word, or not a backslash
             (not_word_backslash if no_begin_end else r"(?:^|" + not_word_backslash + ")")
             + r"(?P<quote>['\"])"  # starting quote
-            + ("(" if capture_inner else "(?:")
+            + ("(" if capture_inner else "(?:")  # start of capture/group
+            # WARNING: never end a comment inside extended regexp with a backslash, even in raw
+            # strings - it'll be treated as line continuation char
             + r"""
             (?:(?:(?!(?P=quote)).)*(?:\\(?P=quote))*)*  # any sequence of not quotes and escaped quotes
             (?<!\\)         # no escaping backslash in front of the ending quote
@@ -273,7 +275,7 @@ class BaseParser:
         + r""")
         )
         (?:\s+|$)""",
-        re.VERBOSE | re.DEBUG,
+        re.VERBOSE,
     )
 
     def __init__(
@@ -460,7 +462,7 @@ class BaseParser:
         # In a sense, it's a duplication of application of the same regexp as above, but we must
         # scope the search to the inside of the braces only
         args = re.findall(self._r_in_quotes, args_str)
-        args = [inner for _,inner in args]
+        args = [inner for _, inner in args]
 
         if self._shouldIgnoreInvocation(args, line_num, pid, args_str):
             return
