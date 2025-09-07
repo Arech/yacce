@@ -11,7 +11,7 @@ from .common import (
     BaseParser,
     CompileCommand,
     escapePath,
-    LinkCommand,
+    OtherCommand,
     kMainDescription,
     LoggingConsole,
     makeCompilersSet,
@@ -150,11 +150,11 @@ class BazelParser(BaseParser):
         cwd: str,  # cwd is execution root dir
         do_test_files: bool,
         compilers: CompilersTuple,
-        do_link: bool,
+        do_other: bool,
         output_base: str,
     ) -> None:
         Con.debug("Running base parser")
-        super().__init__(Con, log_file, cwd, False, compilers, do_link)
+        super().__init__(Con, log_file, cwd, False, compilers, do_other)
 
         self._test_files = do_test_files
         self._output_base = output_base
@@ -178,7 +178,7 @@ class BazelParser(BaseParser):
         extinc_paths: dict[str, str] = {}  # external include paths
         ext_ccs: dict[str, list[CompileCommand]] = {}
         ext_cctimes: dict[str, list[float]] = {}
-        # TODO link commands!
+        # TODO other commands!
 
         new_ccs: list[CompileCommand] = []  # new compile_commands for the project only
         new_ccs_time: list[float] = []
@@ -230,7 +230,7 @@ class BazelParser(BaseParser):
                 new_args = []
                 next_is_path = False
                 for argidx, arg in enumerate(args):
-                    # resolving symlinks to reduce dependency on bazel's internal workspace structure
+                    # resolving symothers to reduce dependency on bazel's internal workspace structure
                     if next_is_path:
                         next_is_path = False
                         m_ext = r_any_external.match(arg)
@@ -315,7 +315,7 @@ class BazelParser(BaseParser):
         self._ext_paths = ext_paths
         self._ext_ccs = ext_ccs
         self._ext_cctimes = ext_cctimes
-        # TODO link commands!
+        # TODO other commands!
 
         self._new_cc = new_ccs
         self._new_cc_time = new_ccs_time
@@ -364,7 +364,7 @@ def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: lis
         args.cwd,
         not args.ignore_not_found,
         args.compiler,
-        args.link_commands,
+        args.other_commands,
         args.output_base,
     )
 

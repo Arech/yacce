@@ -63,17 +63,17 @@ class LoggingConsole(rich.console.Console):
     def error(self, *args, **kwargs):
         if self.log_level > LoggingConsole.LogLevel.Error:
             return None
-        return self._do_log("orange", "Err", *args, **kwargs)
+        return self._do_log("red", "Err", *args, **kwargs)
 
     def failure(self, *args, **kwargs):
         if self.log_level > LoggingConsole.LogLevel.Failure:
             return None
-        return self._do_log("red", "FAIL", *args, **kwargs)
+        return self._do_log("bright_red", "FAIL", *args, **kwargs)
 
     def critical(self, *args, **kwargs):
         if self.log_level > LoggingConsole.LogLevel.Critical:
             return None
-        return self._do_log("magenta", "CRIT", *args, **kwargs)
+        return self._do_log("bright_magenta", "CRIT", *args, **kwargs)
 
     def yacce_begin(self):
         super().print("[bold bright_blue]==== YACCE >>>>>>>>[/bold bright_blue]")
@@ -109,10 +109,12 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     )
 
     parser.add_argument(
-        "-l",
-        "--link_commands",
-        help="If set, will also generate link_commands.json (in a similar format to "
-        "compile_commands, but for linking. Useful to get some insights). Default: %(default)s",
+        "-o",
+        "--other_commands",
+        help="If set, will also generate other_commands.json. This has similar format to "
+        "compile_commands.json, but contain all other found compiler invocations (such as for compiling "
+        "assembler sources, or for linking), that aren't useful for gathering C++ symbol information "
+        "of the project, but handy to get insights about the build in general. Default: %(default)s",
         action=argparse.BooleanOptionalAction,
         default=True,
     )
@@ -176,14 +178,14 @@ def makeCompilersSet(custom_compilers: list[str] | None) -> CompilersTuple:
 
 
 # line_num:int is the number (1 based index) of line in the log that spawned the process
-# is_link:bool is the command is link command
+# is_other:bool is the command is other command
 # cmd_idx:int is the index of command in a corresponding list
 ProcessProps = namedtuple(
-    "ProcessProps", ("start_ts_us", "line_num", "is_link", "cmd_idx", "n_sources")
+    "ProcessProps", ("start_ts_us", "line_num", "is_other", "cmd_idx", "n_sources")
 )
 # args:list[str], output:str, source:str
 CompileCommand = namedtuple("CompileCommand", ("args", "output", "source"))
-LinkCommand = namedtuple("LinkCommand", ("args", "output"))
+OtherCommand = namedtuple("OtherCommand", ("args", "output"))
 
 
 class BaseParser:
@@ -200,11 +202,12 @@ class BaseParser:
         "-cxx-isystem",
     ))
 
-    # To properly find source files in compiler's args, we have to implement a complete args parser,
+    # To properly find source files in compiler's args, we would have to implement a complete parser,
     # which is infeasible. We use an extension/suffix based heuristic and a flags blacklist instead.
+    # Also we're interested not in all sources, but only those contributing information visible
+    # from C++.
     # Set of extensions by which we find source files in compiler's arguments
     # https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html
-    # TODO: add all here, otherwise they go to link cmds
     kExtOfSource = (
         ".c",
         ".i",
@@ -287,6 +290,9 @@ class BaseParser:
         re.VERBOSE,
     )
 
+    # ending of execve() line
+    _r_execve_end = re.compile(r"\)\s*=\s*0\s*$")
+
     def __init__(
         self,
         Con: LoggingConsole,
@@ -294,11 +300,11 @@ class BaseParser:
         cwd: str,
         do_test_files: bool,
         compilers: CompilersTuple,
-        do_link: bool,
+        do_other: bool,
     ) -> None:
         self.Con = Con
         self._compilers = compilers
-        self._do_link = do_link
+        self._do_other = do_other
         self._cwd = cwd
         self._test_files = do_test_files
 
@@ -315,8 +321,8 @@ class BaseParser:
 
         self.compile_commands: list[CompileCommand] = []
         self.compile_cmd_time: list[float] = []
-        self.link_commands: list[LinkCommand] = []
-        self.link_cmd_time: list[float] = []
+        self.other_commands: list[OtherCommand] = []
+        self.other_cmd_time: list[float] = []
         # errors = {} # error_code -> array of line_idx where it happened
 
         self._parseLog(log_file)
@@ -327,17 +333,39 @@ class BaseParser:
             r"^(?P<pid>\d+)\s+(?P<unix_ts>\d+)\.(?P<unix_ts_ms>\d+)\s+(?P<call>execve|execveat|\+\+\+ exited with (?P<exit_code>\d+) \+\+\+)"
         )
 
-        # maps translation_unit->{output: args_str} to verify that commands are unique
-        self._seen_compile: dict[str, dict[str, str]] = {}
-        self._seen_link: dict[str, str] = {}  # just output->args_str
+        # maps translation_unit->{output: (args_str, line_num)} to verify that commands are unique
+        self._seen_compile: dict[str, dict[str, tuple[str, int]]] = {}
+        self._seen_other: dict[str | None, tuple[str, int]] = {}  # just output->(args_str,line_num)
 
         with rich.progress.open(
             log_file, "r", description="Parsing strace log file...", console=self.Con
         ) as file:
+            # sometimes strace breaks reporting of a single execve() call in two lines. All known
+            # cases of that have the first line ending on `<unfinished ...>` literal and the next
+            # line starting with `)` literal. We have to handle this
+            unfinished_line: str | None = None
+            unfinished_args: tuple | None = None
             for line_idx, line in enumerate(file):
-                # TODO: handling line continuations
+                line = line.strip()  # dropping line-ends and other whitespaces
+                # handling line continuations
+                if unfinished_line is not None:
+                    prev_line = unfinished_line
+                    unfinished_line = None
+                    if line.startswith(")"):
+                        self._handleExec(*unfinished_args, prev_line + line)
+                        continue
+                    else:
+                        self.Con.error(
+                            "Line",
+                            line_idx + 1,
+                            "unexpected continuation pattern. Treating both lines as independent.",
+                        )
+                        self._handleExec(*unfinished_args, prev_line)
+                        # falldown to processing below
+
                 match_exec_or_exit = r_exec_or_exit.match(line)
                 if not match_exec_or_exit:
+                    unfinished_line = None
                     continue  # nothing to do here
 
                 pid = int(match_exec_or_exit.group("pid"))
@@ -348,12 +376,31 @@ class BaseParser:
                 exit_code = match_exec_or_exit.group("exit_code")  # could be None
 
                 if call.startswith("+++ "):
+                    unfinished_line = None
                     if pid not in self._running_pids:
                         continue  # this must be not a process we care about
                     self._handleExit(pid, ts, exit_code, line_idx + 1)
                 else:
                     # handle execve/execveat here
-                    self._handleExec(call, pid, ts, line_idx + 1, line[match_exec_or_exit.end() :])
+                    if line.endswith("<unfinished ...>"):
+                        unfinished_line = line[match_exec_or_exit.end() :]
+                        unfinished_args = (call, pid, ts, line_idx + 1)
+                        self.Con.debug(
+                            "Line",
+                            line_idx + 1,
+                            "pid",
+                            pid,
+                            "is unfinished. Deferring processing to the next line.",
+                        )
+                    else:
+                        self._handleExec(
+                            call, pid, ts, line_idx + 1, line[match_exec_or_exit.end() :]
+                        )
+            if unfinished_line is not None:
+                self.Con.error(
+                    "Previous line is marked as unfinished, but this was the last line. Trying to handle it"
+                )
+                self._handleExec(*unfinished_args, unfinished_line)
 
         # finishing unfinished processes
         for pid in list(self._running_pids.keys()):  # must rematerialize since exit() deletes them
@@ -361,23 +408,23 @@ class BaseParser:
 
         assert 0 == len(self._running_pids)
         n_cc = len(self.compile_commands)
-        n_lc = len(self.link_commands)
+        n_lc = len(self.other_commands)
         if n_cc == 0 and n_lc == 0:
             self.Con.warning(
                 "No compiler invocation were found in the log. If you're using a custom compiler, pass it in --compiler option."
             )
         else:
             self.Con.info(n_cc, "compilation commands found")
-            if self._do_link:
-                self.Con.info(n_lc, "link commands found")
+            if self._do_other:
+                self.Con.info(n_lc, "other commands found")
 
         # cleanup
         del self._seen_compile
-        del self._seen_link
+        del self._seen_other
 
     def _handleExit(self, pid: int, ts: float, exit_code: str | None, line_num: int) -> None:
         # negative exit code means the process termination was not found in the log
-        (start_ts, start_line_num, is_link, cmd_idx, n_sources) = self._running_pids[pid]
+        (start_ts, start_line_num, is_other, cmd_idx, n_sources) = self._running_pids[pid]
 
         is_exit_logged = line_num > 0
         if is_exit_logged:  # <=0 line_idx is used when we didn't find the process exit in the log
@@ -410,8 +457,8 @@ class BaseParser:
             )
 
         duration = ts - start_ts if is_exit_logged else 0.0
-        if is_link:
-            self.link_cmd_time[cmd_idx] = duration
+        if is_other:
+            self.other_cmd_time[cmd_idx] = duration
         else:
             self.compile_cmd_time[cmd_idx : cmd_idx + n_sources] = [duration] * n_sources
 
@@ -428,12 +475,10 @@ class BaseParser:
             "an issue supplying a log file with execveat() calls"
         )
         assert line[0:1] == "(", "Unexpected format of the {call} syscall in the log file"
-        if not (line.endswith(" = 0\n") or line.endswith(" = 0")):
-            self.Con.warning(
-                f"Line {line_num}: pid {pid} made call {call} but the return code is not 0. "
-                "This might mean the build wasn't successful and the resulting compile_commands.json "
-                "might be incomplete."
-            )
+
+        # this search is very slow, but it can't be simplified and it's an important diagnostics feature.
+        if not self._r_execve_end.search(line):
+            self.Con.warning(f"Line {line_num}: pid {pid}: unexpected end of '{line}'.")
 
         # extract the first argument of execve, which is the executable path
         match_filepath = self._r_in_quotes.match(line[1:])
@@ -527,48 +572,55 @@ class BaseParser:
                 pass"""
 
         n_sources = len(sources)
-        if n_sources>1:
-            self.Con.warning(f"Line{line_num} pid{pid}: invocation '{args_str}' has {n_sources} sources")
-        # BUGBUG -o have default values!
-
-        has_output = arg_output is not None
-        is_link = n_sources == 0
-
-        if not self._do_link and is_link:
-            return  # not interested in linking commands
-
-        if not has_output:
-            self.Con.error(
-                f"Line {line_num}: pid {pid} made call {call} which doesn't contain an output file (-o). "
-                f"Don't know what to do with it, ignoring. Full command args are: {args_str}"
+        if n_sources > 1:
+            self.Con.warning(
+                f"Line {line_num} pid {pid}: call '{args_str}' has {n_sources} sources"
             )
-            return
+        is_other = n_sources == 0
+
+        if not self._do_other and is_other:
+            return  # not interested in other commands
 
         if arg_output == "/dev/null":  # TODO: could this be moved into kArgToIgnoreInvocation ?
             self.Con.debug(
-                f"Line{line_num} pid{pid}: invocation '{args_str}' is ignored due to -o /dev/null"
+                f"Line {line_num} pid {pid}: call '{args_str}' is ignored due to -o /dev/null"
             )
             return
+
+        if arg_output is None:
+            # arg_output could be not specified at all in which case there're rules for making a default
+            # value for it, The problem is, the rules are based on input files and we can reliably parse
+            # only a subset of possible inputs. We can do something when we know inputs, but otherwise we
+            # have to disable associated checks with the output arg.
+            self.Con.warning(
+                f"Line {line_num} pid {pid}: can't determine output of a call '{args_str}'."
+                " Output based duplicate checks might yield false positives."
+            )
 
         # TODO: do we need to fix the first argument in args to be the same as the one used in
         # execve()? It might be different depending how execve() was called.
 
         arg_str = " ".join(args)
-        if is_link:
-            if self._checkSameLink(arg_str, arg_output):
-                return
-            self.link_commands.append(LinkCommand(args, arg_output))
-            cmd_idx = len(self.link_cmd_time)
-            self.link_cmd_time.append(0.0)
+        if is_other:
+            self._checkSameOther(arg_str, line_num, arg_output)
+            self.other_commands.append(OtherCommand(args, arg_output))
+            cmd_idx = len(self.other_cmd_time)
+            self.other_cmd_time.append(0.0)
         else:
             cmd_idx = len(self.compile_cmd_time)
             for src in sources:
-                if self._checkSameCompile(arg_str, arg_output, src):
-                    return
+                if arg_output is None:
+                    # to guess default value properly, we must parse all command line properly,
+                    # which is infeasible. Instead adding some suffix to the source file and pray
+                    # the build system doesn't do silly things like obtaining several different
+                    # outputs from the same input without specifying outputs precisely.
+                    # Don't rely on defaults, folks! They aren't even stable across compilers.
+                    arg_output = src + ".YACCE_GUESSED"
+                self._checkSameCompile(arg_str, line_num, arg_output, src)
                 self.compile_commands.append(CompileCommand(args, arg_output, src))
                 self.compile_cmd_time.append(0.0)
 
-        self._running_pids[pid] = ProcessProps(ts, line_num, is_link, cmd_idx, n_sources)
+        self._running_pids[pid] = ProcessProps(ts, line_num, is_other, cmd_idx, n_sources)
 
     def _shouldIgnoreInvocation(
         self, args: list[str], line_num: int, pid: int, args_str: str
@@ -658,68 +710,70 @@ class BaseParser:
                 # do nothing
         return args
 
-    def _checkSameCompile(self, arg_str: str, arg_output: str, arg_compile: str) -> bool:
+    def _checkSameCompile(
+        self, arg_str: str, line_num: int, arg_output: str, arg_compile: str
+    ) -> bool:
         if arg_compile in self._seen_compile:
             outp = self._seen_compile[arg_compile]
             if arg_output in outp:
-                if arg_str == outp[arg_output]:
+                prev_args, prev_line = outp[arg_output]
+                if arg_str == prev_args:
                     self.Con.warning(
                         "For translation unit '",
                         arg_compile,
-                        "' the same output",
+                        "' the same output '",
                         arg_output,
-                        "is produced by the second instance of the ~same compilation command '",
+                        "' is produced by the second instance of the ~same compilation command vvv\n",
                         arg_str,
-                        "'. This might be benign, but this isn't normal for a correct build system. "
-                        "Resulting compile_commands.json will contain only one command.",
+                        f"\n^^^. First line was {prev_line}, now it's {line_num}. "
+                        "This might be benign, but this isn't normal for a correct build system. ",
                     )
                     return True
                 else:
                     self.Con.error(
                         "For translation unit '",
                         arg_compile,
-                        "' the same output",
+                        "' the same output '",
                         arg_output,
-                        "is generated by different compilation commands: the first recorded was '",
-                        outp[arg_output],
-                        "' and now it's '",
+                        f"' is generated by different compilation commands: the first recorded was @line {prev_line} vvv\n",
+                        prev_args,
+                        f"\n^^^ and now @line {line_num} it's vvv\n",
                         arg_str,
-                        "'. This isn't normal and most likely means that several build systems were "
-                        "executed. Resulting link_commands.json will contain both, and most likely "
-                        "will not be valid",
+                        "\n^^^. This isn't normal and most likely means that several build systems were "
+                        "executed.",
                     )
             else:
-                outp[arg_output] = arg_str
+                outp[arg_output] = (arg_str, line_num)
         else:
-            self._seen_compile[arg_compile] = {arg_output: arg_str}
+            self._seen_compile[arg_compile] = {arg_output: (arg_str, line_num)}
         return False
 
-    def _checkSameLink(self, arg_str: str, arg_output: str) -> bool:
-        if arg_output in self._seen_link:
-            if arg_str == self._seen_link[arg_output]:
+    def _checkSameOther(self, arg_str: str, line_num: int, arg_output: str | None) -> bool:
+        if arg_output in self._seen_other:
+            prev_args, prev_line = self._seen_other[arg_output]
+            if arg_str == prev_args:
                 self.Con.warning(
-                    "The same output",
+                    "The same output '",
                     arg_output,
-                    "is produced by the second instance of the same link command '",
+                    "' is produced by the second instance of the same other command vvv\n",
                     arg_str,
-                    "'. This might be benign, but this isn't normal for a correct build system. "
-                    "Resulting link_commands.json will contain only one command.",
+                    f"\n^^^. First line was {prev_line}, now it's {line_num}. "
+                    "This might be benign, but this isn't normal for a correct build system. ",
                 )
                 return True
             else:
                 self.Con.error(
-                    "The same output",
+                    "The same output '",
                     arg_output,
-                    "is generated by different link commands: the first recorded was '",
-                    self._seen_link[arg_output],
-                    "' and now it's '",
+                    f"' is generated by different other commands: the first recorded was @line {prev_line} vvv\n",
+                    prev_args,
+                    f"\n^^^ and now @line {line_num} it's vvv\n",
                     arg_str,
-                    "'. This isn't normal and most likely means that several build systems were "
-                    "executed. Resulting link_commands.json will contain both, and most likely "
-                    "will not be valid",
+                    "\n^^^. This isn't normal and most likely means that several build systems were "
+                    "executed.",
                 )
         else:
-            self._seen_link[arg_output] = arg_str
+            self._seen_other[arg_output] = (arg_str, line_num)
         return False
 
     def storeJsons(self, dest_dir: str, save_duration: bool):
@@ -730,12 +784,12 @@ class BaseParser:
             self.compile_cmd_time if save_duration else None,
             self._cwd,
         )
-        if self._do_link:
+        if self._do_other:
             storeJson(
                 self.Con,
                 dest_dir,
-                self.link_commands,
-                self.link_cmd_time if save_duration else None,
+                self.other_commands,
+                self.other_cmd_time if save_duration else None,
                 self._cwd,
             )
 
@@ -743,7 +797,7 @@ class BaseParser:
 def storeJson(
     Con: LoggingConsole,
     path: str,
-    commands: list[CompileCommand] | list[LinkCommand],
+    commands: list[CompileCommand] | list[OtherCommand],
     cmd_times: list[float] | None,
     cwd: str,
     apnd_REMOVE="",
@@ -757,11 +811,11 @@ def storeJson(
     assert not save_duration or len(commands) == len(cmd_times)
 
     e = next(iter(commands))
-    is_link = isinstance(e, LinkCommand)
-    assert is_link or isinstance(e, CompileCommand)
+    is_other = isinstance(e, OtherCommand)
+    assert is_other or isinstance(e, CompileCommand)
 
     filename = os.path.join(
-        path, ("link" if is_link else "compile") + f"_commands{apnd_REMOVE}.json"
+        path, ("other" if is_other else "compile") + f"_commands{apnd_REMOVE}.json"
     )
 
     cwd = cwd.replace('"', '\\"')
@@ -770,17 +824,19 @@ def storeJson(
         for idx, cmd_tuple in enumerate(commands):
             f.write(("," if idx > 0 else "") + "{\n")
             f.write(f' "directory": "{cwd}",\n')
-            if is_link:
+            if is_other:
                 args, arg_output = cmd_tuple
             else:
                 args, arg_output, arg_compile = cmd_tuple
                 f.write(f' "file": "{arg_compile}",\n')
 
-            args_str = '", "'.join(args)
-            f.write(f' "arguments": ["{args_str}"],\n')
             if save_duration:
                 f.write(f' "duration_s": {cmd_times[idx]:.6f},\n')
-            f.write(f' "output": "{arg_output}"\n')
+            if arg_output is not None:
+                f.write(f' "output": "{arg_output}",\n')
+
+            args_str = '", "'.join(args)
+            f.write(f' "arguments": ["{args_str}"]\n')
             f.write("}\n")
 
         f.write("]\n")

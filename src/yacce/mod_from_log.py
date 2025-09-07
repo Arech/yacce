@@ -76,7 +76,7 @@ def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: 
     args = _getArgs(Con, args, unparsed_args)
 
     p = BaseParser(
-        Con, args.log_file, args.cwd, not args.ignore_not_found, args.compiler, args.link_commands
+        Con, args.log_file, args.cwd, not args.ignore_not_found, args.compiler, args.other_commands
     )
 
     dest_dir = args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else os.getcwd()
