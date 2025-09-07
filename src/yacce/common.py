@@ -14,18 +14,19 @@ class YacceException(RuntimeError):
         super().__init__(*args)
 
 
-# taken from https://github.com/Arech/benchstats/blob/be9e925ae85b7dc1c19044ad5f6eddea681f9f77/src/benchstats/common.py#L56
+# adapted from https://github.com/Arech/benchstats/blob/be9e925ae85b7dc1c19044ad5f6eddea681f9f77/src/benchstats/common.py#L56
 class LoggingConsole(rich.console.Console):
     # @enum.verify(enum.CONTINUOUS)  # not supported by Py 3.10
     class LogLevel(enum.IntEnum):
-        Debug = 0
-        Info = 1
-        Warning = 2
-        Error = 3
-        Failure = 4
-        Critical = 5
+        Trace = 0
+        Debug = 1
+        Info = 2
+        Warning = 3
+        Error = 4  # recoverable
+        Failure = 5  # non-recoverable, can continue working
+        Critical = 6  # non-recoverable, must abort
 
-    def __init__(self, log_level: LogLevel = LogLevel.Debug, **kwargs):
+    def __init__(self, log_level: LogLevel = LogLevel.Trace, **kwargs):
         assert isinstance(log_level, LoggingConsole.LogLevel)
         self.log_level = log_level
         if "emoji" not in kwargs:
@@ -44,6 +45,11 @@ class LoggingConsole(rich.console.Console):
 
     def will_log(self, level) -> bool:
         return self.log_level <= level
+
+    def trace(self, *args, **kwargs):
+        if self.log_level > LoggingConsole.LogLevel.Trace:
+            return None
+        return self._do_log("blue", "trce", *args, **kwargs)
 
     def debug(self, *args, **kwargs):
         if self.log_level > LoggingConsole.LogLevel.Debug:
@@ -129,6 +135,41 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     )
 
     parser.add_argument(
+        "--save_line_num",
+        help="If set, will add 'line_num' integer field into a resulting .json that contain a line "
+        "number that reference the compiler call in the source file. Useful for debugging. Default: %(default)s",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+
+    parser.add_argument(
+        "--discard_outputs_with_pfx",
+        help="A build system can compile certain dummy source files only to gather information about "
+        "compiler capabilities. Typically, such files are placed into /tmp or /dev/null, but other variants are possible. "
+        "This setting allows to fully customize detection of which prefixes in compiler's output file "
+        "specification would lead to ignoring the compilation attempt. Default: %(default)s. "
+        'Pass an empty string "" to disable.',
+        nargs="*",
+        default=["/dev/null", "/tmp/"],
+    )
+
+    parser.add_argument(
+        "--discard_sources_with_pfx",
+        help="Similar to --discard_outputs_with_pfx, but controls which prefixes of source files "
+        "passed to a compiler, should lead to ignoring the compiler call. Default: %(default)s. "
+        'Pass an empty string "" to disable.',
+        nargs="*",
+        default=[""],
+    )
+
+    parser.add_argument(
+        "--enable_dupes_check",
+        help="If set, will provide a report if a pair <source, output> isn't unique. Default: %(default)s",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+
+    parser.add_argument(
         "-c",
         "--compiler",
         help="Abs path or basename of a custom compiler used by the build system. Many such arguments can be passed.",
@@ -183,9 +224,9 @@ def makeCompilersSet(custom_compilers: list[str] | None) -> CompilersTuple:
 ProcessProps = namedtuple(
     "ProcessProps", ("start_ts_us", "line_num", "is_other", "cmd_idx", "n_sources")
 )
-# args:list[str], output:str, source:str
-CompileCommand = namedtuple("CompileCommand", ("args", "output", "source"))
-OtherCommand = namedtuple("OtherCommand", ("args", "output"))
+# args:list[str], output:str|None, source:str, line_num:int
+CompileCommand = namedtuple("CompileCommand", ("args", "output", "source", "line_num"))
+OtherCommand = namedtuple("OtherCommand", ("args", "output", "line_num"))
 
 
 class BaseParser:
@@ -293,26 +334,25 @@ class BaseParser:
     # ending of execve() line
     _r_execve_end = re.compile(r"\)\s*=\s*0\s*$")
 
-    def __init__(
-        self,
-        Con: LoggingConsole,
-        log_file: str,
-        cwd: str,
-        do_test_files: bool,
-        compilers: CompilersTuple,
-        do_other: bool,
-    ) -> None:
+    def __init__(self, Con: LoggingConsole, args: argparse.Namespace) -> None:
         self.Con = Con
-        self._compilers = compilers
-        self._do_other = do_other
-        self._cwd = cwd
-        self._test_files = do_test_files
+        self._compilers = args.compiler
+        self._do_other = args.other_commands
+        self._cwd = args.cwd
+        self._test_files = not args.ignore_not_found
+        self._discard_outputs_with_pfx = tuple(
+            s for s in args.discard_outputs_with_pfx if len(s) > 0
+        )
+        self._discard_sources_with_pfx = tuple(
+            s for s in args.discard_sources_with_pfx if len(s) > 0
+        )
+        self._do_dupes_check = args.enable_dupes_check
 
-        assert isinstance(cwd, str)
-        if do_test_files and not os.path.isdir(cwd):
+        assert isinstance(self._cwd, str)
+        if self._test_files and not os.path.isdir(self._cwd):
             Con.warning(
                 "Compilation directory '",
-                cwd,
+                self._cwd,
                 "' doesn't exist. If you used --cwd option, check its correctness. "
                 "Resulting json will likely be invalid.",
             )
@@ -325,7 +365,7 @@ class BaseParser:
         self.other_cmd_time: list[float] = []
         # errors = {} # error_code -> array of line_idx where it happened
 
-        self._parseLog(log_file)
+        self._parseLog(args.log_file)
 
     def _parseLog(self, log_file: str) -> None:
         # match the start of the log string: (<pid>) (<time.stamp>) (execve|execveat|exited...)
@@ -334,7 +374,7 @@ class BaseParser:
         )
 
         # maps translation_unit->{output: (args_str, line_num)} to verify that commands are unique
-        self._seen_compile: dict[str, dict[str, tuple[str, int]]] = {}
+        self._seen_compile: dict[str, dict[str | None, tuple[str, int]]] = {}
         self._seen_other: dict[str | None, tuple[str, int]] = {}  # just output->(args_str,line_num)
 
         with rich.progress.open(
@@ -358,7 +398,7 @@ class BaseParser:
                         self.Con.error(
                             "Line",
                             line_idx + 1,
-                            "unexpected continuation pattern. Treating both lines as independent.",
+                            "has unexpected continuation pattern. Treating this and prev lines as independent.",
                         )
                         self._handleExec(*unfinished_args, prev_line)
                         # falldown to processing below
@@ -385,7 +425,7 @@ class BaseParser:
                     if line.endswith("<unfinished ...>"):
                         unfinished_line = line[match_exec_or_exit.end() :]
                         unfinished_args = (call, pid, ts, line_idx + 1)
-                        self.Con.debug(
+                        self.Con.trace(
                             "Line",
                             line_idx + 1,
                             "pid",
@@ -410,13 +450,13 @@ class BaseParser:
         n_cc = len(self.compile_commands)
         n_lc = len(self.other_commands)
         if n_cc == 0 and n_lc == 0:
-            self.Con.warning(
+            self.Con.print(
                 "No compiler invocation were found in the log. If you're using a custom compiler, pass it in --compiler option."
             )
         else:
-            self.Con.info(n_cc, "compilation commands found")
+            self.Con.print(n_cc, "compilation commands found")
             if self._do_other:
-                self.Con.info(n_lc, "other commands found")
+                self.Con.print(n_lc, "other commands found")
 
         # cleanup
         del self._seen_compile
@@ -439,7 +479,7 @@ class BaseParser:
                 self.Con.warning(
                     f"Line {line_num}: pid {pid} (started at line {start_line_num}) exited with "
                     f"non-zero exit code {exit_code}. This might mean the build wasn't successful "
-                    "and the resulting compile_commands.json might be incomplete."
+                    "and the resulting .json might be incomplete."
                 )
 
             if ts < start_ts:
@@ -453,7 +493,7 @@ class BaseParser:
         else:
             self.Con.warning(
                 f"pid {pid} (started at line {start_line_num}) didn't log its exit. "
-                "This might mean the log file is incomplete and hence so is the resulting compile_commands.json."
+                "This might mean the log file is incomplete and hence so is the resulting .json."
             )
 
         duration = ts - start_ts if is_exit_logged else 0.0
@@ -528,7 +568,6 @@ class BaseParser:
         next_is_output = False
         arg_output = None
         sources = []
-        # is_sources=True # to track -x/--language toggles TODO
         for idx, arg in enumerate(args):
             # TODO argument blacklist
             if next_is_path:
@@ -537,7 +576,7 @@ class BaseParser:
                     self.Con.warning(
                         f"Line {line_num}: pid {pid} made call {call} with argument '{arg}' "
                         "which doesn't exist. This might mean the build system is misconfigured "
-                        "or the log file is incomplete and hence so is the resulting compile_commands.json. "
+                        "or the log file is incomplete and hence so is the resulting .json. "
                         f"Full command args are: {args_str}"
                     )
                 if next_is_output:
@@ -572,52 +611,56 @@ class BaseParser:
                 pass"""
 
         n_sources = len(sources)
-        if n_sources > 1:
-            self.Con.warning(
-                f"Line {line_num} pid {pid}: call '{args_str}' has {n_sources} sources"
-            )
         is_other = n_sources == 0
 
         if not self._do_other and is_other:
             return  # not interested in other commands
 
-        if arg_output == "/dev/null":  # TODO: could this be moved into kArgToIgnoreInvocation ?
-            self.Con.debug(
-                f"Line {line_num} pid {pid}: call '{args_str}' is ignored due to -o /dev/null"
-            )
-            return
-
         if arg_output is None:
-            # arg_output could be not specified at all in which case there're rules for making a default
-            # value for it, The problem is, the rules are based on input files and we can reliably parse
-            # only a subset of possible inputs. We can do something when we know inputs, but otherwise we
-            # have to disable associated checks with the output arg.
+            if self._do_dupes_check:
+                # arg_output could be not specified at all in which case there're rules for making a default
+                # value for it, The problem is, the rules are based on input files and we can reliably parse
+                # only a subset of possible inputs.
+                self.Con.warning(
+                    f"Line {line_num} pid {pid}: output wasn't explicitly set for a call '{args_str}'."
+                    "\nOutput based duplicate checks might yield false positives."
+                )
+        else:
+            if self._discard_outputs_with_pfx and arg_output.startswith(
+                self._discard_outputs_with_pfx
+            ):
+                self.Con.trace(
+                    f"Line {line_num} pid {pid}: call '{args_str}' is ignored due to args.discard_outputs_with_pfx"
+                )
+                return
+
+        if n_sources > 1:
             self.Con.warning(
-                f"Line {line_num} pid {pid}: can't determine output of a call '{args_str}'."
-                " Output based duplicate checks might yield false positives."
+                f"Line {line_num} pid {pid}: call '{args_str}' has {n_sources} sources"
             )
+
+        if self._discard_sources_with_pfx:
+            sources = [s for s in sources if not s.startswith(self._discard_sources_with_pfx)]
+            if not sources:
+                self.Con.trace(
+                    f"Line {line_num} pid {pid}: call '{args_str}' is ignored due to args.discard_sources_with_pfx"
+                )
+                return
 
         # TODO: do we need to fix the first argument in args to be the same as the one used in
         # execve()? It might be different depending how execve() was called.
-
-        arg_str = " ".join(args)
         if is_other:
-            self._checkSameOther(arg_str, line_num, arg_output)
-            self.other_commands.append(OtherCommand(args, arg_output))
+            if self._do_dupes_check:
+                self._checkSameOther(args_str, line_num, arg_output)
+            self.other_commands.append(OtherCommand(args, arg_output, line_num))
             cmd_idx = len(self.other_cmd_time)
             self.other_cmd_time.append(0.0)
         else:
             cmd_idx = len(self.compile_cmd_time)
             for src in sources:
-                if arg_output is None:
-                    # to guess default value properly, we must parse all command line properly,
-                    # which is infeasible. Instead adding some suffix to the source file and pray
-                    # the build system doesn't do silly things like obtaining several different
-                    # outputs from the same input without specifying outputs precisely.
-                    # Don't rely on defaults, folks! They aren't even stable across compilers.
-                    arg_output = src + ".YACCE_GUESSED"
-                self._checkSameCompile(arg_str, line_num, arg_output, src)
-                self.compile_commands.append(CompileCommand(args, arg_output, src))
+                if self._do_dupes_check:
+                    self._checkSameCompile(args_str, line_num, arg_output, src)
+                self.compile_commands.append(CompileCommand(args, arg_output, src, line_num))
                 self.compile_cmd_time.append(0.0)
 
         self._running_pids[pid] = ProcessProps(ts, line_num, is_other, cmd_idx, n_sources)
@@ -633,13 +676,13 @@ class BaseParser:
             return True
 
         if args_len == 2 and args[1] in self.kSoleArgToIgnoreInvocation:
-            self.Con.debug(
+            self.Con.trace(
                 f"Line{line_num} pid{pid}: invocation '{args_str}' is ignored due to a sole arg in kSoleArgToIgnoreInvocation"
             )
             return True
 
         if any(1 for a in args if a in self.kArgToIgnoreInvocation):
-            self.Con.debug(
+            self.Con.trace(
                 f"Line{line_num} pid{pid}: invocation '{args_str}' is ignored due to an arg in kArgToIgnoreInvocation"
             )
             return True
@@ -650,7 +693,7 @@ class BaseParser:
             if a.startswith(self.kArgStartsWithIgnoreInvocation)
             and a not in self.kArgStartsWithIgnoreInvocationException
         ):
-            self.Con.debug(
+            self.Con.trace(
                 f"Line{line_num} pid{pid}: invocation '{args_str}' is ignored due to an arg satisfying kArgStartsWithIgnoreInvocation"
             )
             return True
@@ -665,7 +708,7 @@ class BaseParser:
             if os.path.isfile(fname):
                 fsize = os.path.getsize(fname)
                 if fsize > 64 * 1024:  # randomly sufficient threshold
-                    self.Con.warning(
+                    self.Con.info(
                         f"Line {line_num}: pid {pid} has @file argument#{i} '{args[i]}' that "
                         "points to a file of size",
                         fsize,
@@ -711,21 +754,22 @@ class BaseParser:
         return args
 
     def _checkSameCompile(
-        self, arg_str: str, line_num: int, arg_output: str, arg_compile: str
+        self, arg_str: str, line_num: int, arg_output: str | None, arg_compile: str
     ) -> bool:
         if arg_compile in self._seen_compile:
             outp = self._seen_compile[arg_compile]
             if arg_output in outp:
                 prev_args, prev_line = outp[arg_output]
+                output_repr = "<<not_determined>>" if arg_output is None else arg_output
                 if arg_str == prev_args:
                     self.Con.warning(
                         "For translation unit '",
                         arg_compile,
                         "' the same output '",
-                        arg_output,
+                        output_repr,
                         "' is produced by the second instance of the ~same compilation command vvv\n",
                         arg_str,
-                        f"\n^^^. First line was {prev_line}, now it's {line_num}. "
+                        f"\n^^^. First line was @line#{prev_line}, now it's line#{line_num}. "
                         "This might be benign, but this isn't normal for a correct build system. ",
                     )
                     return True
@@ -734,12 +778,12 @@ class BaseParser:
                         "For translation unit '",
                         arg_compile,
                         "' the same output '",
-                        arg_output,
-                        f"' is generated by different compilation commands: the first recorded was @line {prev_line} vvv\n",
+                        output_repr,
+                        f"' is generated by different compilation commands: the first recorded was @line#{prev_line} vvv\n",
                         prev_args,
-                        f"\n^^^ and now @line {line_num} it's vvv\n",
+                        f"\n^^^ and now @line#{line_num} it's vvv\n",
                         arg_str,
-                        "\n^^^. This isn't normal and most likely means that several build systems were "
+                        "\n^^^. This isn't normal and could mean that several build systems were "
                         "executed.",
                     )
             else:
@@ -751,38 +795,40 @@ class BaseParser:
     def _checkSameOther(self, arg_str: str, line_num: int, arg_output: str | None) -> bool:
         if arg_output in self._seen_other:
             prev_args, prev_line = self._seen_other[arg_output]
+            output_repr = "<<not_determined>>" if arg_output is None else arg_output
             if arg_str == prev_args:
                 self.Con.warning(
                     "The same output '",
-                    arg_output,
+                    output_repr,
                     "' is produced by the second instance of the same other command vvv\n",
                     arg_str,
-                    f"\n^^^. First line was {prev_line}, now it's {line_num}. "
+                    f"\n^^^. First was @line#{prev_line}, now it's line#{line_num}. "
                     "This might be benign, but this isn't normal for a correct build system. ",
                 )
                 return True
             else:
                 self.Con.error(
                     "The same output '",
-                    arg_output,
-                    f"' is generated by different other commands: the first recorded was @line {prev_line} vvv\n",
+                    output_repr,
+                    f"' is generated by different other commands: the first recorded was @line#{prev_line} vvv\n",
                     prev_args,
-                    f"\n^^^ and now @line {line_num} it's vvv\n",
+                    f"\n^^^ and now @line#{line_num} it's vvv\n",
                     arg_str,
-                    "\n^^^. This isn't normal and most likely means that several build systems were "
+                    "\n^^^. This isn't normal and could mean that several build systems were "
                     "executed.",
                 )
         else:
             self._seen_other[arg_output] = (arg_str, line_num)
         return False
 
-    def storeJsons(self, dest_dir: str, save_duration: bool):
+    def storeJsons(self, dest_dir: str, save_duration: bool, save_line_num: bool):
         storeJson(
             self.Con,
             dest_dir,
             self.compile_commands,
             self.compile_cmd_time if save_duration else None,
             self._cwd,
+            save_line_num,
         )
         if self._do_other:
             storeJson(
@@ -791,6 +837,7 @@ class BaseParser:
                 self.other_commands,
                 self.other_cmd_time if save_duration else None,
                 self._cwd,
+                save_line_num,
             )
 
 
@@ -800,11 +847,14 @@ def storeJson(
     commands: list[CompileCommand] | list[OtherCommand],
     cmd_times: list[float] | None,
     cwd: str,
-    apnd_REMOVE="",
+    save_line_num: bool,
+    file_sfx="",
 ):
     if not commands:
         assert not cmd_times
-        Con.debug("storeJson() got empty list for path", path)
+        Con.debug(
+            "storeJson() got empty list for path '", path, "' and file suffix '", file_sfx, "'"
+        )
         return
 
     save_duration = cmd_times is not None
@@ -815,7 +865,7 @@ def storeJson(
     assert is_other or isinstance(e, CompileCommand)
 
     filename = os.path.join(
-        path, ("other" if is_other else "compile") + f"_commands{apnd_REMOVE}.json"
+        path, ("other" if is_other else "compile") + f"_commands{file_sfx}.json"
     )
 
     cwd = cwd.replace('"', '\\"')
@@ -825,11 +875,13 @@ def storeJson(
             f.write(("," if idx > 0 else "") + "{\n")
             f.write(f' "directory": "{cwd}",\n')
             if is_other:
-                args, arg_output = cmd_tuple
+                args, arg_output, line_num = cmd_tuple
             else:
-                args, arg_output, arg_compile = cmd_tuple
+                args, arg_output, arg_compile, line_num = cmd_tuple
                 f.write(f' "file": "{arg_compile}",\n')
 
+            if save_line_num:
+                f.write(f' "line_num": {line_num},\n')
             if save_duration:
                 f.write(f' "duration_s": {cmd_times[idx]:.6f},\n')
             if arg_output is not None:
@@ -840,7 +892,7 @@ def storeJson(
             f.write("}\n")
 
         f.write("]\n")
-    Con.info("Written", len(commands), "commands to", filename)
+    Con.print("Written", len(commands), "commands to", filename)
 
 
 def unescapePath(path: str) -> str:

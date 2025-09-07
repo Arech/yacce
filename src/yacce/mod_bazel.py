@@ -85,12 +85,9 @@ def _getArgs(
     parser.add_argument(
         "--external_save_path",
         help="If '--external separate' was set, using this option one could override a directory into which to save "
-        "dependencies specific individual compile_commands.json. Default is '$(bazel info output_base)/external'",
-    )
-
-    parser.add_argument(
-        "--output_base",
-        help="An override to use in place of $(bazel info output_base).",
+        "dependencies specific individual compile_commands.json. Default is where the external repo resides "
+        "(typically it's '$(bazel info output_base)/external', but depends on the build system "
+        "and --override_repository bazel flag value)",
     )
 
     parser.add_argument(
@@ -143,34 +140,16 @@ def _getArgs(
 
 
 class BazelParser(BaseParser):
-    def __init__(
-        self,
-        Con: LoggingConsole,
-        log_file: str,
-        cwd: str,  # cwd is execution root dir
-        do_test_files: bool,
-        compilers: CompilersTuple,
-        do_other: bool,
-        output_base: str,
-    ) -> None:
-        Con.debug("Running base parser")
-        super().__init__(Con, log_file, cwd, False, compilers, do_other)
+    def __init__(self, Con: LoggingConsole, args: argparse.Namespace) -> None:
+        Con.trace("Running base parser")
+        do_test_files = not args.ignore_not_found
+        setattr(args, "ignore_not_found", True)
+        super().__init__(Con, args)
 
+        setattr(args, "ignore_not_found", do_test_files)
         self._test_files = do_test_files
-        self._output_base = output_base
 
-        assert isinstance(output_base, str), (
-            "Output base parameter is mandatory. Use --output_base CLI option."
-        )
-        if do_test_files and not os.path.isdir(output_base):
-            Con.warning(
-                "Output base directory '",
-                output_base,
-                "' does not exist. If you used an override --output_base, you might need to fix it. "
-                "Resulting json will likely be invalid.",
-            )
-
-        Con.debug("Starting bazel specific processing...")
+        Con.trace("Starting bazel specific processing...")
         self._update()
 
     def _update(self) -> None:
@@ -204,7 +183,7 @@ class BazelParser(BaseParser):
                 # TODO add progress bar here
 
                 cctime = self.compile_cmd_time[ccidx]
-                args, output, source = cc
+                args, output, source, line_num = cc
 
                 # deciding if this is external
                 m_external = r_any_external.match(source)
@@ -271,7 +250,7 @@ class BazelParser(BaseParser):
 
                     new_args.append(arg)
 
-                new_cc = CompileCommand(new_args, output, source)
+                new_cc = CompileCommand(new_args, output, source, line_num)
                 if m_external:
                     ext_ccs.setdefault(repo, []).append(new_cc)
                     ext_cctimes.setdefault(repo, []).append(cctime)
@@ -295,7 +274,7 @@ class BazelParser(BaseParser):
             )
 
         ext_paths |= extinc_paths
-        self.Con.info(
+        self.Con.print(
             "External dependencies list has",
             len(ext_paths),
             "entries:",
@@ -320,23 +299,25 @@ class BazelParser(BaseParser):
         self._new_cc = new_ccs
         self._new_cc_time = new_ccs_time
 
-    def storeJsons(self, dest_dir: str, save_duration: bool):
-        super().storeJsons(dest_dir, save_duration)
+    def storeJsons(self, dest_dir: str, save_duration: bool, save_line_num: bool):
+        super().storeJsons(dest_dir, save_duration, save_line_num)
         storeJson(
             self.Con,
             dest_dir,
             self._new_cc,
             self._new_cc_time if save_duration else None,
             self._cwd,
+            save_line_num,
             "_new",
         )
-        for repo, lst in self._ext_ccs.items():
+        for repo in sorted(self._ext_ccs.keys()):
             storeJson(
                 self.Con,
                 dest_dir,
-                lst,
+                self._ext_ccs[repo],
                 self._ext_cctimes[repo] if save_duration else None,
                 self._cwd,
+                save_line_num,
                 f"_ext_{repo}",
             )
 
@@ -355,23 +336,13 @@ def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: lis
 
     # only after finishing the build we could query bazel properties
     # TODO update args.cwd from bazel
-    # TODO update args.output_base from bazel
 
-    # parsing strace log to produce raw commands.
-    p = BazelParser(
-        Con,
-        args.log_file,
-        args.cwd,
-        not args.ignore_not_found,
-        args.compiler,
-        args.other_commands,
-        args.output_base,
-    )
+    p = BazelParser(Con, args)
 
     # TODO handling of args.external and args.external_save_path
 
     dest_dir = args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else os.getcwd()
 
-    p.storeJsons(dest_dir, args.save_duration)
+    p.storeJsons(dest_dir, args.save_duration, args.save_line_num)
 
     return 0
