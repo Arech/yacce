@@ -191,11 +191,11 @@ class BazelParser(BaseParser):
                     repo = m_external.group(1)
                     if repo not in ext_paths:
                         repo_path = os.path.realpath(os.path.join(self._cwd, "external", repo))
-                        if self._test_files and not os.path.isdir(repo_path):
+                        if self._test_files and not os.path.exists(repo_path):
                             repo_path2 = os.path.realpath(
-                                os.path.join(self._cwd, "/../../external", repo)
+                                os.path.join(self._cwd, "../../external", repo)
                             )
-                            if os.path.isdir(repo_path2):
+                            if os.path.exists(repo_path2):
                                 self.Con.warning(
                                     "External repo '",
                                     repo,
@@ -250,11 +250,11 @@ class BazelParser(BaseParser):
                             r = m_ext.group(1)
                             if r not in extinc_paths:
                                 repo_path = os.path.realpath(os.path.join(self._cwd, "external", r))
-                                if self._test_files and not os.path.isdir(repo_path):
+                                if self._test_files and not os.path.exists(repo_path):
                                     repo_path2 = os.path.realpath(
-                                        os.path.join(self._cwd, "/../../external", r)
+                                        os.path.join(self._cwd, "../../external", r)
                                     )
-                                    if os.path.isdir(repo_path2):
+                                    if os.path.exists(repo_path2):
                                         self.Con.warning(
                                             "External include repo '",
                                             repo,
