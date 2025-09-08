@@ -129,15 +129,18 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         "--save_duration",
         help="If set, will add 'duration_s' field into a resulting .json that contain how long the command run in "
         "seconds with microsecond resolution. Have no automated use, but can be inspected manually, or with a custom "
-        "script to obtain build system performance insights. Default: %(default)s",
+        "script to obtain build system performance insights. Default: %(default)s. Note that currently clangd gets upset "
+        "when it encounters fields it doesn't know, so enabling this might prevent you from using clangd with the resulting file",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
     )
 
     parser.add_argument(
         "--save_line_num",
         help="If set, will add 'line_num' integer field into a resulting .json that contain a line "
-        "number that reference the compiler call in the source file. Useful for debugging. Default: %(default)s",
+        "number that reference the compiler call in the source file. Useful for debugging. "
+        "Default: %(default)s. Note that currently clangd gets upset "
+        "when it encounters fields it doesn't know, so enabling this might prevent you from using clangd with the resulting file",
         action=argparse.BooleanOptionalAction,
         default=False,
     )
