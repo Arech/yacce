@@ -18,6 +18,7 @@ from .common import (
     storeJson,
     toAbsPathUnescape,
     unescapePath,
+    warnClangdIncompatibilitiesIfAny,
 )
 
 
@@ -65,7 +66,7 @@ def _getArgs(
         choices=["always", "expunge", "never"],
         help="Determines, if 'bazel clean' or 'bazel clean --expunge' commands are executed, or no "
         "cleaning is done before running the build. Note that if cleaning is disabled, "
-        "cached (already compiled) translation units will be invisible to yacce and hence will not "
+        "cached (already compiled) sources will be invisible to yacce and hence will not "
         "make it into resulting compiler_commands.json!",
     )
 
@@ -152,6 +153,28 @@ class BazelParser(BaseParser):
         Con.trace("Starting bazel specific processing...")
         self._update()
 
+    def _makeFullPath(
+        self, is_external: bool, subdir: str, path_ending: str, is_file: bool, warn=True
+    ) -> tuple[str, bool]:
+        exists = False
+        fullpath = os.path.realpath(os.path.join(self._cwd, subdir, path_ending))
+        if self._test_files:
+            exists = (is_file and os.path.isfile(fullpath)) or (
+                (not is_file) and os.path.exists(fullpath)
+            )
+            if is_external and not exists:
+                fullpath2 = os.path.realpath(os.path.join(self._cwd, "../..", subdir, path_ending))
+                exists = os.path.exists(fullpath2)
+                if exists:
+                    fullpath = fullpath2
+                else:
+                    if warn:
+                        self.Con.warning(
+                            f"External '{subdir}/{path_ending}' not found in both expected paths",
+                            (fullpath, fullpath2),
+                        )
+        return fullpath, exists
+
     def _update(self) -> None:
         ext_paths: dict[str, str] = {}  # external canonical_name -> realpath
         extinc_paths: dict[str, str] = {}  # external include paths
@@ -164,6 +187,7 @@ class BazelParser(BaseParser):
 
         notfound_inc: set[str] = set()
 
+        r_external = re.compile(r"^(?:\.\/)?external\/")
         # generated files such as 'bazel-out/k8-opt/bin/external/<repo>/..' are also externals!
         # matches repo part in any external path spec. Not sure leading optional ./ is useful,
         # haven't seen it, but leaving it just in case
@@ -178,10 +202,7 @@ class BazelParser(BaseParser):
                 "Applying bazel specific transformations to the log...",
                 total=len(self.compile_commands),
             )
-
             for ccidx, cc in enumerate(self.compile_commands):
-                # TODO add progress bar here
-
                 cctime = self.compile_cmd_time[ccidx]
                 args, output, source, line_num = cc
 
@@ -190,53 +211,22 @@ class BazelParser(BaseParser):
                 if m_external:
                     repo = m_external.group(1)
                     if repo not in ext_paths:
-                        repo_path = os.path.realpath(os.path.join(self._cwd, "external", repo))
-                        if self._test_files and not os.path.exists(repo_path):
-                            repo_path2 = os.path.realpath(
-                                os.path.join(self._cwd, "../../external", repo)
+                        repo_path, exists = self._makeFullPath(True, "external", repo, False)
+                        if self._test_files and not exists:
+                            self.Con.warning(
+                                f"External repo '{repo}' not found at expected path '{repo_path}'"
                             )
-                            if os.path.exists(repo_path2):
-                                self.Con.warning(
-                                    "External repo '",
-                                    repo,
-                                    "' doesn't exist at expected path '",
-                                    repo_path,
-                                    "', but exist under main external path '",
-                                    repo_path2,
-                                    "'. Using the main external path.",
-                                )
-                                repo_path = repo_path2
-                            else:
-                                self.Con.warning(
-                                    "External repo '",
-                                    repo,
-                                    "' doesn't exist at expected path '",
-                                    repo_path,
-                                    "' as well as under main external path '",
-                                    repo_path2,
-                                    "'.",
-                                )
-
                         ext_paths[repo] = repo_path
                 else:
                     repo = None
 
                 # checking and updating the source path
-                path = toAbsPathUnescape(self._cwd, source)
-                if self._test_files and not os.path.isfile(path):
-                    if m_external:
-                        path2 = toAbsPathUnescape(os.path.join(self._cwd, "../.."), source)
-                        if os.path.isfile(path2):
-                            path = path2
-                        else:
-                            self.Con.warning(
-                                "Translation unit ",
-                                path,
-                                "doesn't exist in both expected locations of an external!",
-                            )
-                    else:
-                        self.Con.warning("Translation unit ", path, "doesn't exist!")
-                source = escapePath(os.path.realpath(path))
+                path, exists = self._makeFullPath(
+                    bool(r_external.match(source)), "", unescapePath(source), True
+                )
+                if self._test_files and not exists:
+                    self.Con.warning("Source file", path, "not found!")
+                source = escapePath(path)
                 # no need to check and update output
 
                 new_args = []
@@ -249,57 +239,33 @@ class BazelParser(BaseParser):
                         if m_ext:
                             r = m_ext.group(1)
                             if r not in extinc_paths:
-                                repo_path = os.path.realpath(os.path.join(self._cwd, "external", r))
-                                if self._test_files and not os.path.exists(repo_path):
-                                    repo_path2 = os.path.realpath(
-                                        os.path.join(self._cwd, "../../external", r)
+                                repo_path, exists = self._makeFullPath(True, "external", r, False)
+                                if self._test_files and not exists:
+                                    self.Con.warning(
+                                        f"External include repo '{r}' not found at expected path '{repo_path}'"
                                     )
-                                    if os.path.exists(repo_path2):
-                                        self.Con.warning(
-                                            "External include repo '",
-                                            repo,
-                                            "' doesn't exist at expected path '",
-                                            repo_path,
-                                            "', but exist under main external path '",
-                                            repo_path2,
-                                            "'. Using the main external path.",
-                                        )
-                                        repo_path = repo_path2
-                                    else:
-                                        self.Con.warning(
-                                            "External include repo '",
-                                            repo,
-                                            "' doesn't exist at expected path '",
-                                            repo_path,
-                                            "' as well as under main external path '",
-                                            repo_path2,
-                                            "'.",
-                                        )
                                 extinc_paths[r] = repo_path
 
-                        path = toAbsPathUnescape(self._cwd, arg)
-                        if self._test_files and not os.path.exists(path):
+                        path, exists = self._makeFullPath(
+                            bool(r_external.match(arg)), "", unescapePath(arg), False, warn=False
+                        )
+                        if self._test_files and not exists:
                             err = True
-                            if m_ext:
-                                path2 = toAbsPathUnescape(os.path.join(self._cwd, "../.."), arg)
-                                if os.path.isfile(path2):
-                                    path=path2
-                                    err = False
+                            # ignoring existence test failure for same qualified args starting with bazel-out/k8-opt/bin/external/... dirs
+                            # that exist as just normally qualified external/... args. This seems to be a bazel quirk
+                            m_bzl_ext = r_bazel_external.match(arg)
+                            if m_bzl_ext:
+                                ext = m_bzl_ext.group(1)
+                                qual = args[argidx - 1]  # can't be negative
+                                # TODO: O(n^2), but maybe will improve later
+                                for ai, a in enumerate(args[1:]):
+                                    # ai refs previous args element
+                                    if a == ext and qual == args[ai]:
+                                        err = False
+                                        break
                             if err:
-                                # ignoring existence test failure for same qualified args starting with bazel-out/k8-opt/bin/external/... dirs
-                                # that exist as just normally qualified external/... args. This seems to be a bazel quirk
-                                m_bzl_ext = r_bazel_external.match(arg)
-                                if m_bzl_ext:
-                                    ext = m_bzl_ext.group(1)
-                                    qual = args[argidx - 1]  # can't be negative
-                                    # TODO: O(n^2), but maybe will improve later
-                                    for ai, a in enumerate(args[1:]):
-                                        if a == ext and qual == args[ai]:  # refs previous args element
-                                            err = False
-                                            break
-                                if err:
-                                    notfound_inc.add(arg)
-                        arg = escapePath(os.path.realpath(path))
+                                notfound_inc.add(arg)
+                        arg = escapePath(path)
 
                     elif arg in self.kArgIsPath:
                         next_is_path = True
@@ -360,6 +326,7 @@ class BazelParser(BaseParser):
         storeJson(
             self.Con,
             dest_dir,
+            True,
             self._new_cc,
             self._new_cc_time if save_duration else None,
             self._cwd,
@@ -370,6 +337,7 @@ class BazelParser(BaseParser):
             storeJson(
                 self.Con,
                 dest_dir,
+                True,
                 self._ext_ccs[repo],
                 self._ext_cctimes[repo] if save_duration else None,
                 self._cwd,
@@ -400,5 +368,7 @@ def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: lis
     dest_dir = args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else os.getcwd()
 
     p.storeJsons(dest_dir, args.save_duration, args.save_line_num)
+
+    warnClangdIncompatibilitiesIfAny(Con, args)
 
     return 0

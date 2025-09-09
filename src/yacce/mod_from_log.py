@@ -9,7 +9,7 @@ from .common import (
     kMainDescription,
     LoggingConsole,
     makeCompilersSet,
-    storeJson,
+    warnClangdIncompatibilitiesIfAny,
     YacceException,
 )
 
@@ -81,5 +81,7 @@ def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: 
 
     dest_dir = args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else os.getcwd()
     p.storeJsons(dest_dir, args.save_duration, args.save_line_num)
+
+    warnClangdIncompatibilitiesIfAny(Con, args)
     
     return 0

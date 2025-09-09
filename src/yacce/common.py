@@ -128,7 +128,7 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     parser.add_argument(
         "--save_duration",
         help="If set, will add 'duration_s' field into a resulting .json that contain how long the command run in "
-        "seconds with microsecond resolution. Have no automated use, but can be inspected manually, or with a custom "
+        "seconds with microsecond resolution. This currently doesn't have automated use, but can be inspected manually, or with a custom "
         "script to obtain build system performance insights. Default: %(default)s. Note that currently clangd gets upset "
         "when it encounters fields it doesn't know, so enabling this might prevent you from using clangd with the resulting file",
         action=argparse.BooleanOptionalAction,
@@ -188,6 +188,20 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     )
 
     return parser
+
+
+def warnClangdIncompatibilitiesIfAny(Con: LoggingConsole, args: argparse.Namespace) -> None:
+    def _warnField(flag: str, fld_name: str):
+        Con.warning(
+            f"Each .json entry have a custom field '{fld_name}' that might be incompatible "
+            f"with clangd. Don't use --{flag} CLI argument if you intend to feed resulting compile_commands.json to clangd."
+        )
+
+    if args.save_duration:
+        _warnField("save_duration", "duration_s")
+
+    if args.save_line_num:
+        _warnField("save_line_num", "line_num")
 
 
 CompilersTuple = namedtuple("CompilersTuple", ["basenames", "fullpaths"])
@@ -341,7 +355,7 @@ class BaseParser:
         self.Con = Con
         self._compilers = args.compiler
         self._do_other = args.other_commands
-        self._cwd = args.cwd
+        self._cwd = os.path.realpath(args.cwd)
         self._test_files = not args.ignore_not_found
         self._discard_outputs_with_pfx = tuple(
             s for s in args.discard_outputs_with_pfx if len(s) > 0
@@ -351,7 +365,6 @@ class BaseParser:
         )
         self._do_dupes_check = args.enable_dupes_check
 
-        assert isinstance(self._cwd, str)
         if self._test_files and not os.path.isdir(self._cwd):
             Con.warning(
                 "Compilation directory '",
@@ -376,7 +389,7 @@ class BaseParser:
             r"^(?P<pid>\d+)\s+(?P<unix_ts>\d+)\.(?P<unix_ts_ms>\d+)\s+(?P<call>execve|execveat|\+\+\+ exited with (?P<exit_code>\d+) \+\+\+)"
         )
 
-        # maps translation_unit->{output: (args_str, line_num)} to verify that commands are unique
+        # maps source->{output: (args_str, line_num)} to verify that commands are unique
         self._seen_compile: dict[str, dict[str | None, tuple[str, int]]] = {}
         self._seen_other: dict[str | None, tuple[str, int]] = {}  # just output->(args_str,line_num)
 
@@ -766,7 +779,7 @@ class BaseParser:
                 output_repr = "<<not_determined>>" if arg_output is None else arg_output
                 if arg_str == prev_args:
                     self.Con.warning(
-                        "For translation unit '",
+                        "For source '",
                         arg_compile,
                         "' the same output '",
                         output_repr,
@@ -778,7 +791,7 @@ class BaseParser:
                     return True
                 else:
                     self.Con.error(
-                        "For translation unit '",
+                        "For source '",
                         arg_compile,
                         "' the same output '",
                         output_repr,
@@ -828,6 +841,7 @@ class BaseParser:
         storeJson(
             self.Con,
             dest_dir,
+            True,
             self.compile_commands,
             self.compile_cmd_time if save_duration else None,
             self._cwd,
@@ -837,6 +851,7 @@ class BaseParser:
             storeJson(
                 self.Con,
                 dest_dir,
+                False,
                 self.other_commands,
                 self.other_cmd_time if save_duration else None,
                 self._cwd,
@@ -847,17 +862,22 @@ class BaseParser:
 def storeJson(
     Con: LoggingConsole,
     path: str,
+    is_compile_commands: bool,
     commands: list[CompileCommand] | list[OtherCommand],
     cmd_times: list[float] | None,
     cwd: str,
     save_line_num: bool,
     file_sfx="",
 ):
+    filename = os.path.join(
+        path, ("compile" if is_compile_commands else "other") + f"_commands{file_sfx}.json"
+    )
+    if os.path.exists(filename):
+        os.remove(filename)
+
     if not commands:
         assert not cmd_times
-        Con.debug(
-            "storeJson() got empty list for path '", path, "' and file suffix '", file_sfx, "'"
-        )
+        Con.debug("storeJson() got empty list for '", filename, "'")
         return
 
     save_duration = cmd_times is not None
@@ -866,10 +886,7 @@ def storeJson(
     e = next(iter(commands))
     is_other = isinstance(e, OtherCommand)
     assert is_other or isinstance(e, CompileCommand)
-
-    filename = os.path.join(
-        path, ("other" if is_other else "compile") + f"_commands{file_sfx}.json"
-    )
+    assert int(is_other) + int(is_compile_commands) == 1
 
     cwd = cwd.replace('"', '\\"')
     with open(filename, "w") as f:
@@ -911,7 +928,7 @@ def toAbsPathUnescape(cwd: str, path: str) -> str:
     path = unescapePath(path)
     if not os.path.isabs(path):
         path = os.path.join(cwd, path)
-    return path
+    return os.path.realpath(path)  # resolve symlinks so isfile() or isdir() works properly
 
 
 def unescapedPathExists(cwd: str, path: str) -> bool:
