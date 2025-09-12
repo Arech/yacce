@@ -194,8 +194,43 @@ class BazelParser(BaseParser):
         r_any_external = re.compile(
             r"^(?:\.\/)?(?:bazel-[^\/]+\/[^\/]+\/bin\/)?external\/([^\/]+)\/"
         )
-        # matches a whole external/... part in bazel-..././external/.. path spec
+        # matches a whole external/... part in bazel-../../external/.. path spec
         r_bazel_external = re.compile(r"^(?:\.\/)?bazel-[^\/]+\/[^\/]+\/bin\/(external\/.+)$")
+
+        def _fix_path(arg: str, argidx: int, args: list[str]|None) -> str:
+            nonlocal extinc_paths, notfound_inc
+            m_ext = r_any_external.match(arg)
+            if m_ext:
+                r = m_ext.group(1)
+                if r not in extinc_paths:
+                    repo_path, exists = self._makeFullPath(True, "external", r, False)
+                    if self._test_files and not exists:
+                        self.Con.warning(
+                            f"External include repo '{r}' not found at expected path '{repo_path}'"
+                        )
+                    extinc_paths[r] = repo_path
+
+            path, exists = self._makeFullPath(
+                bool(r_external.match(arg)), "", unescapePath(arg), False, warn=False
+            )
+            if self._test_files and not exists:
+                err = True
+                if args is not None:
+                    # ignoring existence test failure for same qualified args starting with bazel-out/k8-opt/bin/external/... dirs
+                    # that exist as just normally qualified external/... args. This seems to be a bazel quirk
+                    m_bzl_ext = r_bazel_external.match(arg)
+                    if m_bzl_ext:
+                        ext = m_bzl_ext.group(1)
+                        qual = args[argidx - 1]  # can't be negative
+                        # TODO: O(n^2), but maybe will improve later
+                        for ai, a in enumerate(args[1:]):
+                            # ai refs previous args element
+                            if a == ext and qual == args[ai]:
+                                err = False
+                                break
+                if err:
+                    notfound_inc.add(arg)
+            return escapePath(path)
 
         with Progress(console=self.Con) as progress:  # transient=True,
             task = progress.add_task(
@@ -235,40 +270,16 @@ class BazelParser(BaseParser):
                     # resolving symlinks to reduce dependency on bazel's internal workspace structure
                     if next_is_path:
                         next_is_path = False
-                        m_ext = r_any_external.match(arg)
-                        if m_ext:
-                            r = m_ext.group(1)
-                            if r not in extinc_paths:
-                                repo_path, exists = self._makeFullPath(True, "external", r, False)
-                                if self._test_files and not exists:
-                                    self.Con.warning(
-                                        f"External include repo '{r}' not found at expected path '{repo_path}'"
-                                    )
-                                extinc_paths[r] = repo_path
-
-                        path, exists = self._makeFullPath(
-                            bool(r_external.match(arg)), "", unescapePath(arg), False, warn=False
-                        )
-                        if self._test_files and not exists:
-                            err = True
-                            # ignoring existence test failure for same qualified args starting with bazel-out/k8-opt/bin/external/... dirs
-                            # that exist as just normally qualified external/... args. This seems to be a bazel quirk
-                            m_bzl_ext = r_bazel_external.match(arg)
-                            if m_bzl_ext:
-                                ext = m_bzl_ext.group(1)
-                                qual = args[argidx - 1]  # can't be negative
-                                # TODO: O(n^2), but maybe will improve later
-                                for ai, a in enumerate(args[1:]):
-                                    # ai refs previous args element
-                                    if a == ext and qual == args[ai]:
-                                        err = False
-                                        break
-                            if err:
-                                notfound_inc.add(arg)
-                        arg = escapePath(path)
-
-                    elif arg in self.kArgIsPath:
+                        arg = _fix_path(arg, argidx, args)
+                    elif arg in self.kArgIsPath and (
+                        arg not in self.kCheckArgForSysrootSpec
+                        or not arg.startswith(self.kSysrootSpec)
+                    ):
                         next_is_path = True
+                    elif m_pfx_arg := self.r_pfx_arg_is_path.match(arg):
+                        path_part = arg[m_pfx_arg.end() :]
+                        if path_part:
+                            arg = m_pfx_arg.group() + _fix_path(path_part, argidx, None)
 
                     new_args.append(arg)
 
@@ -322,7 +333,7 @@ class BazelParser(BaseParser):
         self._new_cc_time = new_ccs_time
 
     def storeJsons(self, dest_dir: str, save_duration: bool, save_line_num: bool):
-        super().storeJsons(dest_dir, save_duration, save_line_num)
+        super().storeJsons(dest_dir, save_duration, save_line_num, sfx="_combined")
         storeJson(
             self.Con,
             dest_dir,
@@ -331,7 +342,6 @@ class BazelParser(BaseParser):
             self._new_cc_time if save_duration else None,
             self._cwd,
             save_line_num,
-            "_new",
         )
         for repo in sorted(self._ext_ccs.keys()):
             storeJson(

@@ -247,24 +247,97 @@ OtherCommand = namedtuple("OtherCommand", ("args", "output", "line_num"))
 
 
 class BaseParser:
-    # TODO update the list!
-    # list of a compiler arguments that should contain a file/dir path
-    kArgIsPath = frozenset((
-        "-o",
+    kOutputArgs = ("-o", "--output")
+    # List of a compiler arguments that should contain a file/dir path.
+    # Note, we're interested only in args that are important for C++ symbols extraction
+    # https://gcc.gnu.org/onlinedocs/gcc/Directory-Options.html
+    # https://clang.llvm.org/docs/ClangCommandLineReference.html#diagnostic-options
+    kArgIsPath = frozenset(
+        kOutputArgs
+        + (
+            "-I",
+            "-iquote",
+            "-isystem",
+            "-idirafter",
+            "-isysroot",
+            "--include-directory",
+            "--include-directory-after--sysroot",
+            "-cxx-isystem",
+            "--library-directory",
+            "-imacros",
+            "--imacros",
+            "-include",
+            "--include",
+        )
+    )
+
+    # List of a compiler arguments that could start with = or $SYSROOT specification.
+    # https://gcc.gnu.org/onlinedocs/gcc/Directory-Options.html#index-I
+    kCheckArgForSysrootSpec = frozenset((
         "-I",
-        "--include-directory",
+        "-iquote",
         "-isystem",
+        "-idirafter",
+        "--include-directory",
+    ))
+    kSysrootSpec = ("=", "$SYSROOT")
+
+    # list of a compiler arguments that should contain a path as a suffix.
+    kPfxArgIsPath = (
+        "-L",
+        "--sysroot=",
+        "-F",
+        "--output=",
+        "--embed-dir=",
+        "--include-directory=",
+        "-cxx-isystem",
+        "-I",
+        "-idirafter",
+        "--include-directory-after=",
+        "-imacros",
+        "--imacros",
+        "--imacros=",
+        "-include",
+        "--include",
+        "--include=",
         "-iquote",
         "-isysroot",
-        "--sysroot",
-        "-cxx-isystem",
+        "-isystem",
+        "-isystem-after",
+        "-stdlib++-isystem",
+        "--library-directory=",
+    )
+    r_pfx_arg_is_path = re.compile(r"^(" + "|".join(re.escape(s) for s in kPfxArgIsPath) + r")")
+
+    # list of important for compilation, but unsupported (yet?) arguments.
+    kArgUnsupported = frozenset((
+        "-iprefix",
+        "--include-prefix",
+        "-iwithprefix",
+        "-iwithprefixbefore",
+        "--include-with-prefix",
+        "--include-with-prefix-after",
+        "--include-with-prefix-before",
+        "-working-directory",
+        "--system-header-prefix",
     ))
+    kPfxArgUnsupported = (
+        "-working-directory=",
+        "-iprefix",
+        "--include-prefix=",
+        "-iwithprefix",
+        "--include-with-prefix-after=",
+        "--include-with-prefix=",
+        "-iwithprefixbefore",
+        "--include-with-prefix-before=",
+        "-iwithsysroot",
+        "--system-header-prefix=",
+        "--no-system-header-prefix=",
+    )
 
     # To properly find source files in compiler's args, we would have to implement a complete parser,
     # which is infeasible. We use an extension/suffix based heuristic and a flags blacklist instead.
-    # Also we're interested not in all sources, but only those contributing information visible
-    # from C++.
-    # Set of extensions by which we find source files in compiler's arguments
+    # We aren't interested in all sources, but only those contributing information visible from C++.
     # https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html
     kExtOfSource = (
         ".c",
@@ -282,6 +355,12 @@ class BaseParser:
         ".CPP",
         ".c++",
         ".C",
+        # C++20 modules
+        ".ixx",
+        ".cppm",
+        ".cxxm",
+        ".c++m",
+        ".ccm",
     )
 
     # if a path/file argument is preceded by any of the following flags, the arg is not a source
@@ -292,7 +371,7 @@ class BaseParser:
     # isolated dash is for compilation from stdin - there's nothing we can do with it
     kArgToIgnoreInvocation = frozenset(("--version", "-"))
     # when there's only one arg and it matches anything below, ignore the invocation
-    kSoleArgToIgnoreInvocation = frozenset(("-v",))
+    kSoleArgToIgnoreInvocation = frozenset(("-v", "--verbose"))
     # if an arg starts with these substring, the invocation will be ignored
     kArgStartsWithIgnoreInvocation = ("-print", "--print")
     # with the exception of the below args
@@ -393,6 +472,8 @@ class BaseParser:
         self._seen_compile: dict[str, dict[str | None, tuple[str, int]]] = {}
         self._seen_other: dict[str | None, tuple[str, int]] = {}  # just output->(args_str,line_num)
 
+        self._unsupported_args = set()  # set of found unsupported args
+
         with rich.progress.open(
             log_file, "r", description="Parsing strace log file...", console=self.Con
         ) as file:
@@ -474,9 +555,17 @@ class BaseParser:
             if self._do_other:
                 self.Con.print(n_lc, "other commands found")
 
+        if self._unsupported_args:
+            self.Con.warning(
+                f"Found use of {len(self._unsupported_args)} unsupported arguments: {sorted(self._unsupported_args)}. "
+                "These were ignored even though they might affect correctness of the resulting .json. "
+                "If you think these should be supported, consider making a PR or reporting an issue."
+            )
+
         # cleanup
         del self._seen_compile
         del self._seen_other
+        del self._unsupported_args
 
     def _handleExit(self, pid: int, ts: float, exit_code: str | None, line_num: int) -> None:
         # negative exit code means the process termination was not found in the log
@@ -519,6 +608,15 @@ class BaseParser:
             self.compile_cmd_time[cmd_idx : cmd_idx + n_sources] = [duration] * n_sources
 
         del self._running_pids[pid]
+
+    def _testPathExists(self, arg: str, line_num: int, pid: int, args_str: str) -> None:
+        if self._test_files and not unescapedPathExists(self._cwd, arg):
+            self.Con.warning(
+                f"Line {line_num}: pid {pid} uses argument '{arg}' "
+                "which doesn't exist. This might mean the build system is misconfigured "
+                "or the log file is incomplete and hence so is the resulting .json. "
+                f"Full command args are: {args_str}"
+            )
 
     def _handleExec(self, call: str, pid: int, ts: float, line_num: int, line: str) -> None:
         assert pid not in self._running_pids  # should be checked by the caller
@@ -584,29 +682,44 @@ class BaseParser:
         next_is_output = False
         arg_output = None
         sources = []
+
         for idx, arg in enumerate(args):
             # TODO argument blacklist
             if next_is_path:
                 next_is_path = False
-                if self._test_files and not unescapedPathExists(self._cwd, arg):
-                    self.Con.warning(
-                        f"Line {line_num}: pid {pid} made call {call} with argument '{arg}' "
-                        "which doesn't exist. This might mean the build system is misconfigured "
-                        "or the log file is incomplete and hence so is the resulting .json. "
-                        f"Full command args are: {args_str}"
-                    )
+                self._testPathExists(arg, line_num, pid, args_str)
                 if next_is_output:
                     next_is_output = False
                     if arg_output is not None:
                         self.Con.warning(
-                            f"Line {line_num}: pid {pid} made call {call} with multiple -o options. "
+                            f"Line {line_num}: pid {pid} uses multiple output options. "
                             f"This is unusual, taking the last one. Full command args are: {args_str}"
                         )
                     arg_output = arg  # it's already escaped
-            elif arg in self.kArgIsPath:
+            elif arg in self.kArgIsPath and (
+                arg not in self.kCheckArgForSysrootSpec or not arg.startswith(self.kSysrootSpec)
+            ):  # do nothing for sysroot spec, as it's a subdir of tested -sysroot
                 next_is_path = True
-                if arg == "-o":
+                if arg in self.kOutputArgs:
                     next_is_output = True
+            elif m_pfx_arg := self.r_pfx_arg_is_path.match(arg):
+                path_part = arg[m_pfx_arg.end() :]
+                if path_part:
+                    self._testPathExists(path_part, line_num, pid, args_str)
+                    if "--output=" == m_pfx_arg.group(1):
+                        if arg_output is not None:
+                            self.Con.warning(
+                                f"Line {line_num}: pid {pid} uses multiple output options. "
+                                f"This is unusual, taking the last one. Full command args are: {args_str}"
+                            )
+                        arg_output = path_part  # it's already escaped
+                else:
+                    self.Con.error(
+                        f"Line {line_num}: pid {pid} uses '{arg}' argument without a path. "
+                        f"This is likely a bug. Full command args are: {args_str}"
+                    )
+            elif arg in self.kArgUnsupported or arg.startswith(self.kPfxArgUnsupported):
+                self._unsupported_args.add(arg)
             elif (
                 arg.endswith(self.kExtOfSource)
                 and idx > 0
@@ -837,7 +950,9 @@ class BaseParser:
             self._seen_other[arg_output] = (arg_str, line_num)
         return False
 
-    def storeJsons(self, dest_dir: str, save_duration: bool, save_line_num: bool):
+    def storeJsons(
+        self, dest_dir: str, save_duration: bool, save_line_num: bool, sfx: str = ""
+    ) -> None:
         storeJson(
             self.Con,
             dest_dir,
@@ -846,6 +961,7 @@ class BaseParser:
             self.compile_cmd_time if save_duration else None,
             self._cwd,
             save_line_num,
+            file_sfx=sfx,
         )
         if self._do_other:
             storeJson(
@@ -856,6 +972,7 @@ class BaseParser:
                 self.other_cmd_time if save_duration else None,
                 self._cwd,
                 save_line_num,
+                file_sfx=sfx,
             )
 
 
@@ -877,7 +994,7 @@ def storeJson(
 
     if not commands:
         assert not cmd_times
-        Con.debug("storeJson() got empty list for '", filename, "'")
+        Con.info("storeJson() got empty list to save into '", filename, "'")
         return
 
     save_duration = cmd_times is not None
