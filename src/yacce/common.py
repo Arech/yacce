@@ -104,7 +104,6 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         "yacce will try to test if mentioned files exist in this directory and warn if they aren't, "
         "but passing files existence test alone doesn't guarantee that the resulting compile_commands.json will be correct."
         + addendums.get("cwd", ""),
-        type=str,
     )
 
     parser.add_argument(
@@ -167,7 +166,11 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
 
     parser.add_argument(
         "--enable_dupes_check",
-        help="If set, will provide a report if a pair <source, output> isn't unique. Default: %(default)s",
+        help="If set, will provide a report if a pair <source, output> isn't unique. "
+        "Usefulness of this flag solely depends on actual build system implementation. Some might "
+        "use lots of temporary compilations just to gather compiler capabilities which could lead "
+        "to an avalanche of false positives. This could be mitigated with --discard* family of flags, "
+        "but this requires manual intervention. Default: %(default)s",
         action=argparse.BooleanOptionalAction,
         default=False,
     )
@@ -183,8 +186,9 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     parser.add_argument(
         "-d",
         "--dest_dir",
-        help="Destination directory into which to create compile_commands.json. Default: current working directory."
+        help="Destination directory into which to create resulting .json files. Must exist."
         + addendums.get("dest_dir", ""),
+        # no default as it depends on the mode
     )
 
     return parser
@@ -953,6 +957,9 @@ class BaseParser:
     def storeJsons(
         self, dest_dir: str, save_duration: bool, save_line_num: bool, sfx: str = ""
     ) -> None:
+        if not os.path.isdir(dest_dir):
+            raise YacceException(f"Destination directory '{dest_dir}' doesn't exist")
+
         storeJson(
             self.Con,
             dest_dir,

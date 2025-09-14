@@ -102,6 +102,8 @@ def main():
 
     try:
         ret = kModeFuncs[mode](Con, args, unparsed_args)
+        common.warnClangdIncompatibilitiesIfAny(Con, args)
+        
         Con.debug(f"Exiting with code {ret}")
         sys.exit(ret)
     except common.YacceException as e:

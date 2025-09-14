@@ -2,9 +2,8 @@ import argparse
 import os
 import re
 from rich.progress import Progress
+import subprocess
 import sys
-
-from yacce.common import CompilersTuple
 
 from .common import (
     addCommonCliArgs,
@@ -16,9 +15,9 @@ from .common import (
     LoggingConsole,
     makeCompilersSet,
     storeJson,
-    toAbsPathUnescape,
     unescapePath,
     warnClangdIncompatibilitiesIfAny,
+    YacceException,
 )
 
 
@@ -37,7 +36,7 @@ def _getArgs(
 
     parser.add_argument(
         "--log_file",
-        help="Use this file path template for the strace log. See also '--from_log'. Default: %(default)s",
+        help="Use this file for the strace log. See also '--from_log'. Default: %(default)s",
         default=os.path.join(os.getcwd(), "strace.txt"),
     )
 
@@ -56,9 +55,9 @@ def _getArgs(
     excl2 = {"keep_log"}
     p_live.add_argument(
         "--keep_log",
-        choices=["if_failed", "always", "never"],
-        help="Determines what to do with the log file after building, generation and parsing of the "
-        "log file finishes. Default is 'if_failed'. Mutually exclusive with --from_log.",
+        choices=["if_errors", "always", "never"],
+        help="Determines if the strace log file should remain to exist after yacce "
+        "finishes. Default is 'if_errors'. Mutually exclusive with --from_log.",
     )
     excl2 |= {"clean"}
     p_live.add_argument(
@@ -67,41 +66,65 @@ def _getArgs(
         help="Determines, if 'bazel clean' or 'bazel clean --expunge' commands are executed, or no "
         "cleaning is done before running the build. Note that if cleaning is disabled, "
         "cached (already compiled) sources will be invisible to yacce and hence will not "
-        "make it into resulting compiler_commands.json!",
+        "make it into resulting compiler_commands.json! If not specified, yacce will ask if running "
+        "clean is ok.",
     )
 
     parser.add_argument(
         "--external",
-        choices=["ignore", "separate", "squash"],
-        default="ignore",
+        choices=["ignore", "combine-with-overridden", "to-files", "to-external"],
+        default="combine-with-overridden",
         help="Determines what to do when a compilation of a project's dependency (from 'external/' "
-        "subdirectory) is found. Default option is to just 'ignore' it and not save into the "
-        "resulting compile_commands.json. You can also ask yacce to produce individual 'separate' "
-        "compile_commands.json in each respective external/ directory, which is useful for "
-        "investigating dependencies compilation (see also --external_save_path to override "
-        "destination path for this). The last option is just to "
-        "'squash' these compilation commands of all externals into the main single compile_commands.json",
+        "subdirectory) is found. One option is to just 'ignore' it and leave in resulting "
+        "compile_commands.json only commands related to the project. "
+        "Default option 'combine-with-overridden' produces a single compile_commands.json containing "
+        "main project files as well as dependencies that are resolved to be stored outside of their "
+        "usual location '$(bazel info output_base)/external/<repo>' (this typically happens when you "
+        "override a repo location for bazel to work simultaneously on the project and its dependency). "
+        "Option 'to-files' produces individual files nearby the main compile_commands.json, named like"
+        "compile_commands_ext_<repo>.json for each external dependency <repo> (this might be useful "
+        "for manual inspection/combination). The last option "
+        "'to-external' produces an individual compile_commands.json in each external dependency's "
+        "directory and is useful for investigating dependencies compilation. "
+        "By default, compile_commands.json will be saved to the bazel workspace directory (see the "
+        "--bazel_workspace argument), but this could be overridden with --dest_dir argument.",
     )
-
-    parser.add_argument(
-        "--external_save_path",
-        help="If '--external separate' was set, using this option one could override a directory into which to save "
-        "dependencies specific individual compile_commands.json. Default is where the external repo resides "
-        "(typically it's '$(bazel info output_base)/external', but depends on the build system "
-        "and --override_repository bazel flag value)",
-    )
+    # TODO proper handling of --external and file paths
 
     parser.add_argument(
         "--bazel_command",
         default="bazel",
         help="A command to run to communicate with instance of bazel for current build system. "
-        "Note that it always assumes that yacce runs inside a bazel workspace directory. "
+        "It's highly recommended to use bazelisk instead of bazel. "
+        "To set workspace directory use --bazel_workspace. "
         "Default: %(default)s",
+    )
+
+    parser.add_argument(
+        "--bazel_workspace",
+        help="Overrides bazel workspace directory to set directory context for the bazel command (see "
+        "also --bazel_command). This is useful if yacce needs to be run from the outside of that "
+        "workspace. Note that any dir under real workspace would also do here. "
+        "If not set, the current working directory '%(default)s' is used.",
+        default=os.getcwd(),
+    )
+
+    parser.add_argument(
+        "--build_cwd",
+        help="By default, a shell command to start the build is invoked from the bazel workspace "
+        "directory (see also --bazel_workspace). This option allows to override that and set a "
+        "different directory as a cwd for the build command. Note that this is different from --cwd option, which "
+        "for the 'bazel --from_log' mode of yacce specifies '$(bazel info execution_root)' directory.",
     )
 
     parser = addCommonCliArgs(
         parser,
-        {"cwd": " Set this to override output of $(bazel info execution_root)."},
+        {
+            "cwd": " Set this to override output of $(bazel info execution_root) for parsing "
+            "existing log without running bazel itself. If the build system has to be run, "
+            "this argument is either has to be unset, or match to the output of $(bazel info execution_root).",
+            "dest_dir": " If set, the resulting .json files will be stored into this dir instead of bazel workspace directory.",
+        },
     )
 
     # looking for -- in unparsed_args to save build system invocation args.
@@ -132,9 +155,10 @@ def _getArgs(
         sys.exit(2)
     # taking care of defaults that weren't set due to mutual exclusion check. argparse is a crap too
     if args.keep_log is None:
-        setattr(args, "keep_log", "if_failed")
-    if args.clean is None:
-        setattr(args, "clean", "always")
+        setattr(args, "keep_log", "if_errors")
+    # leaving .clean untouched so we could later ask the user
+    # if args.clean is None:
+    #    setattr(args, "clean", "always")
 
     setattr(args, "compiler", makeCompilersSet(args.compiler))
     return args, unparsed_args
@@ -197,7 +221,7 @@ class BazelParser(BaseParser):
         # matches a whole external/... part in bazel-../../external/.. path spec
         r_bazel_external = re.compile(r"^(?:\.\/)?bazel-[^\/]+\/[^\/]+\/bin\/(external\/.+)$")
 
-        def _fix_path(arg: str, argidx: int, args: list[str]|None) -> str:
+        def _fix_path(arg: str, argidx: int, args: list[str] | None) -> str:
             nonlocal extinc_paths, notfound_inc
             m_ext = r_any_external.match(arg)
             if m_ext:
@@ -356,29 +380,203 @@ class BazelParser(BaseParser):
             )
 
 
+class BazelWrap:
+    """Takes care of communicating with bazel, including running the build system with strace and
+    producing the log file.
+
+    More precisely:
+    - checks if bazel is available
+    - checks if strace is available
+    - if requested, runs 'bazel clean' or 'bazel clean --expunge'
+    - sets up strace to log build system execution
+    - runs the build system with strace
+
+    Irrecoverable errors are reported as YacceException.
+    """
+
+    def __init__(self, Con: LoggingConsole, args: argparse.Namespace):
+        """Initializes the runner."""
+        self.Con = Con
+
+        assert args.bazel_command and args.bazel_workspace and hasattr(args, "from_log")
+        self._bazel: str = args.bazel_command
+
+        args.bazel_workspace = os.path.realpath(args.bazel_workspace)
+        if not os.path.isdir(args.bazel_workspace):
+            raise YacceException(
+                f"Bazel workspace directory '{args.bazel_workspace}' doesn't exist"
+            )
+        self._workspace_dir: str = args.bazel_workspace
+
+        self._from_log: bool = bool(args.from_log)
+        self._bazel_tested: bool = False
+        self._execution_root: str | None = None
+
+    def _getExecutionRoot(self) -> str:
+        if not self._execution_root:
+            self._checkBazel()
+            try:
+                self._execution_root = self._queryBazelThrow("info", "execution_root")
+                # this assumes that build system was run and hence execution_root exists
+                if not self._execution_root or not os.path.isdir(self._execution_root):
+                    raise YacceException(
+                        f"Invalid or non-existing execution_root directory '{self._execution_root}' returned by bazel"
+                    )
+            except Exception as e:
+                raise YacceException(f"Failed to query bazel execution root: {e}")
+
+        return self._execution_root
+
+    def fixCwdAsExecutionRoot(self, args: argparse.Namespace) -> None:
+        """If necessary, queries bazel for execution root and modifies args to set it as cwd."""
+        assert hasattr(args, "cwd")
+        if args.cwd:
+            args.cwd = os.path.realpath(args.cwd)
+            # only querying bazel if the build system has to be run. Pure "from_log" should be able
+            # to work even on a different machine.
+            if not self._from_log:
+                self.Con.debug(
+                    "--cwd is specified. Checking if it matches with real execution root..."
+                )
+                exec_root = self._getExecutionRoot()
+                if args.cwd != exec_root:
+                    self.Con.warning(
+                        f"Specified cwd '{args.cwd}' doesn't match to bazel execution root '{exec_root}'. "
+                        "Will ignore --cwd specification and use what bazel provided."
+                    )
+                    args.cwd = exec_root
+        else:
+            self.Con.debug("Querying bazel for execution root...")
+            args.cwd = self._getExecutionRoot()
+        self._execution_root = args.cwd
+
+    def _queryBazelThrow(self, *args) -> str:
+        self.Con.debug("Querying '", self._bazel, "' with args:", args)
+        r = (
+            subprocess.run(
+                [self._bazel, *args],
+                cwd=self._workspace_dir,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,  # bazel might spew lot's of useless stuff to stderr
+            )
+            .stdout.decode("utf-8")
+            .rstrip()
+        )
+        self.Con.debug("result:", r)
+        return r
+
+    def _checkBazel(self) -> None:
+        if not self._bazel_tested:
+            assert self._bazel and self._workspace_dir  # doing this once
+            self.Con.debug("Checking if '", self._bazel, "' exists in:", self._workspace_dir)
+            try:
+                v = self._queryBazelThrow("--version")
+                self.Con.info(
+                    f"{v} is detected in directory: '{self._workspace_dir}' using command '{self._bazel}'"
+                )
+                self._bazel_tested = True
+            except Exception as e:
+                raise YacceException(
+                    f"Failed to run bazel ('{self._bazel}') in directory: '{self._workspace_dir}': {e}"
+                )
+
+    def runBuild(self, args: argparse.Namespace, build_system_args: list) -> None:
+        self.Con.debug("Running the build...")
+        assert not args.from_log
+        assert not self._execution_root, "execution_root should be queried after running the build"
+        assert len(build_system_args) > 0
+        self.build_system_args = build_system_args
+
+        assert args.log_file and args.keep_log
+        # making sure the log file is absolute path to mitigate cwd changes in strace
+        args.log_file = os.path.realpath(args.log_file)
+        if os.path.exists(args.log_file):
+            self.Con.warning(f"Log file '{args.log_file}' already exists and will be overwritten.")
+            os.remove(args.log_file)
+
+        self._checkBazel()
+        self._checkStrace()
+
+        self._handleClean(args)
+
+        self._runBazelWithStrace()
+
+    def _handleClean(self, args: argparse.Namespace) -> None:
+        if args.clean is None:
+            ans = input(
+                "\nATTENTION!\n\n--clean argument wasn't specified. To gather all build system information, yacce "
+                "has to supervise the complete build process therefore it's recommended to run "
+                "'bazel clean' before the build to ensure all files are recompiled and hence "
+                "traced.\nDo you authorize yacce to run 'bazel clean' now? [Y/n]: "
+            )
+            if ans.lower() == "n":
+                args.clean = "never"
+            else:
+                args.clean = "always"
+
+        if args.clean in ("always", "expunge"):
+            self._bazelClean(args.clean == "expunge")
+        else:
+            self.Con.debug("Skipping bazel clean as requested.")
+
+    def _checkStrace(self) -> None:
+        assert self._workspace_dir
+        self.Con.debug("Checking if 'strace' is available in:", self._workspace_dir)
+        try:
+            run_res = subprocess.run(
+                ["strace", "--version"],
+                cwd=self._workspace_dir,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+            stderr = run_res.stderr.decode("utf-8").rstrip()
+            if stderr:
+                self.Con.warning(
+                    "'strace --version' produced output to stderr which is unexpected for return code 0. It might not work properly. STDERR =",
+                    stderr,
+                )
+            stdout = run_res.stdout.decode("utf-8").rstrip()
+            self.Con.info(f"Using {stdout}")
+        except Exception as e:
+            raise YacceException("Failed to check 'strace' utility version: {e}")
+
+    def _bazelClean(self, expunge: bool) -> None:
+        self.Con.info(f"Cleaning the build{' with --expunge' if expunge else ''}...")
+        args = ("clean",) + (("--expunge",) if expunge else ())
+        try:
+            self._queryBazelThrow(*args)
+            self.Con.debug("Successfully cleaned the build")
+        except Exception as e:
+            raise YacceException(f"Failed to '{self._bazel} {' '.join(args)}': {e}")
+
+    def _runBazelWithStrace(self) -> None:
+        pass
+
+
 def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list) -> int:
     args, build_system_args = _getArgs(Con, args, unparsed_args)
 
     Con.debug("bazel mode args: ", args)
     Con.debug("build_system_args:", build_system_args)
 
-    if not args.from_log:
-        # TODO call bazel clean
-        # TODO run the build system and gather trace. Note, there'll be different trace filename!
-        # so an update to args.log_file is needed
-        pass
+    bzl = BazelWrap(Con, args)
 
-    # only after finishing the build we could query bazel properties
-    # TODO update args.cwd from bazel
+    if not args.from_log:
+        bzl.runBuild(args, build_system_args)
+
+    # Only after finishing the build we could query bazel properties. Updating args.cwd from bazel
+    bzl.fixCwdAsExecutionRoot(args)
+
+    raise NotImplementedError("dbg stop")
 
     p = BazelParser(Con, args)
 
-    # TODO handling of args.external and args.external_save_path
-
-    dest_dir = args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else os.getcwd()
-
+    # TODO proper handling of args.external
+    dest_dir = (
+        args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else args.bazel_workspace
+    )
     p.storeJsons(dest_dir, args.save_duration, args.save_line_num)
-
-    warnClangdIncompatibilitiesIfAny(Con, args)
-
     return 0

@@ -59,13 +59,17 @@ def _getArgs(
         {
             "cwd": " Relative path specification is always resolved to "
             "the absolute path using directory of the log file. "
-            "Default: directory of the log file."
+            "Default: directory of the log file.",
+            "dest_dir":" Default: current working directory."
         },
     )
     args = parser.parse_args(unparsed_args, namespace=args)
 
     if args.log_file is None or not os.path.isfile(args.log_file):
         raise YacceException(f"Log file '{args.log_file}' is not specified or does not exist.")
+    
+    if not args.dest_dir:
+        args.dest_dir = os.getcwd()
 
     args = _fixCwdArg(Con, args)
     setattr(args, "compiler", makeCompilersSet(args.compiler))
@@ -79,9 +83,5 @@ def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: 
         Con, args.log_file, args.cwd, not args.ignore_not_found, args.compiler, args.other_commands
     )
 
-    dest_dir = args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else os.getcwd()
-    p.storeJsons(dest_dir, args.save_duration, args.save_line_num)
-
-    warnClangdIncompatibilitiesIfAny(Con, args)
-    
+    p.storeJsons(args.dest_dir, args.save_duration, args.save_line_num)    
     return 0
