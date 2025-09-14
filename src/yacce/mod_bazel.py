@@ -2,8 +2,14 @@ import argparse
 import os
 import re
 from rich.progress import Progress
+import shutil
+import signal
 import subprocess
 import sys
+
+if "linux" == sys.platform:
+    import pty
+    import shlex
 
 from .common import (
     addCommonCliArgs,
@@ -30,7 +36,7 @@ def _getArgs(
         + "\n\nMode 'bazel' is intended to generate compile_commands.json from tracing execution of "
         "invocation of 'bazel build' or similar command, using Linux's strace utility. This mode uses "
         "some knowledge of how bazel works to produce a correct output.",
-        usage="yacce [global options] [bazel] [options (see below)] [-- shell command eventually invoking bazel]",
+        usage="yacce [global options] [bazel] [options (see below)] [-- command for bash eventually invoking bazel]",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -411,6 +417,32 @@ class BazelWrap:
         self._from_log: bool = bool(args.from_log)
         self._bazel_tested: bool = False
         self._execution_root: str | None = None
+        self._path: str | None = None
+
+    def _getPath(self) -> str:
+        if not self._path:
+            path = os.environ.get("PATH", "")
+            if not path:
+                path = os.defpath
+            path = self._workspace_dir + os.pathsep + os.getcwd() + os.pathsep + path
+            self._path = path
+        return self._path
+
+    def _resolveBinaryPath(self, binary: str) -> str:
+        """Resolves the path to the binary, if necessary."""
+        if not os.path.isabs(binary):
+            path = self._getPath()
+            binary_path = shutil.which(binary, path=path)
+            if not binary_path:
+                raise YacceException(f"Failed to find '{binary}' in PATH='{path}'")
+            self.Con.debug(f"Resolved '{binary}' to '{binary_path}'")
+        else:
+            binary_path = binary
+        if not os.path.isfile(binary_path) or not os.access(binary_path, os.X_OK):
+            raise YacceException(
+                f"Binary '{binary}' (as {binary_path}) doesn't exist or is not executable"
+            )
+        return binary_path
 
     def _getExecutionRoot(self) -> str:
         if not self._execution_root:
@@ -469,7 +501,8 @@ class BazelWrap:
     def _checkBazel(self) -> None:
         if not self._bazel_tested:
             assert self._bazel and self._workspace_dir  # doing this once
-            self.Con.debug("Checking if '", self._bazel, "' exists in:", self._workspace_dir)
+            self._bazel = self._resolveBinaryPath(self._bazel)
+            self.Con.debug("Checking if '", self._bazel, "' works in:", self._workspace_dir)
             try:
                 v = self._queryBazelThrow("--version")
                 self.Con.info(
@@ -486,7 +519,6 @@ class BazelWrap:
         assert not args.from_log
         assert not self._execution_root, "execution_root should be queried after running the build"
         assert len(build_system_args) > 0
-        self.build_system_args = build_system_args
 
         assert args.log_file and args.keep_log
         # making sure the log file is absolute path to mitigate cwd changes in strace
@@ -500,7 +532,7 @@ class BazelWrap:
 
         self._handleClean(args)
 
-        self._runBazelWithStrace()
+        self._runBazelWithStrace(args.log_file, args.keep_log, build_system_args)
 
     def _handleClean(self, args: argparse.Namespace) -> None:
         if args.clean is None:
@@ -522,10 +554,11 @@ class BazelWrap:
 
     def _checkStrace(self) -> None:
         assert self._workspace_dir
+        self._strace = self._resolveBinaryPath("strace")
         self.Con.debug("Checking if 'strace' is available in:", self._workspace_dir)
         try:
             run_res = subprocess.run(
-                ["strace", "--version"],
+                [self._strace, "--version"],
                 cwd=self._workspace_dir,
                 check=True,
                 stdout=subprocess.PIPE,
@@ -552,8 +585,141 @@ class BazelWrap:
         except Exception as e:
             raise YacceException(f"Failed to '{self._bazel} {' '.join(args)}': {e}")
 
-    def _runBazelWithStrace(self) -> None:
-        pass
+    def _getBazelServerPid(self) -> int:
+        self.Con.debug("Querying bazel server PID...")
+        try:
+            pid_str = None
+            pid_str = self._queryBazelThrow("info", "server_pid")
+            pid = int(pid_str)
+            if pid <= 0:
+                raise YacceException(f"Invalid bazel server PID '{pid}' returned by bazel")
+            self.Con.debug(f"Bazel server PID is {pid}")
+            return pid
+        except ValueError:
+            raise YacceException(f"Non-integer bazel server PID '{pid_str}' was returned by bazel")
+        except Exception as e:
+            raise YacceException(f"Failed to query bazel server PID: {e}")
+
+    def _launchStrace(self, server_pid: int, log_file: str) -> subprocess.Popen:
+        try:
+            strace_cmd = [
+                self._strace,
+                "--follow-forks",
+                "--trace=execve,execveat,exit",
+                "--status=successful",
+                "--string-limit=8192",
+                "--absolute-timestamps=format:unix,precision:us",
+                "--quiet=attach,personality,exit",  # reducing unnecessary output to stderr
+                f"--attach={server_pid}",
+                f"--output={log_file}",
+            ]
+            self.Con.debug(
+                f"Launching strace on server_pid {server_pid}, logging to '{log_file}' with a command:",
+                strace_cmd,
+            )
+
+            strace_proc = subprocess.Popen(
+                strace_cmd,
+                cwd=self._workspace_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,  # unfortunately strace outputs everything to stderr
+            )
+            retcode = strace_proc.poll()
+            if retcode is not None:
+                if strace_proc.stderr:
+                    stderr = strace_proc.stderr.read().decode("utf-8").rstrip()
+                else:
+                    stderr = "<unknown>"
+                raise YacceException(
+                    f"Failed to launch strace on PID {server_pid}, it exited immediately with code {retcode}. STDERR='{stderr}'"
+                )
+
+            self.Con.debug(f"Strace launched with PID {strace_proc.pid}")
+            return strace_proc
+        except Exception as e:
+            raise YacceException(f"Failed to launch strace on PID {server_pid}: {e}")
+
+    def _runBazelWithStrace(self, log_file: str, keep_log: str, build_system_args: list) -> None:
+        server_pid = self._getBazelServerPid()
+
+        shown_begin = False
+        with self._launchStrace(server_pid, log_file) as strace:
+            try:
+                shell_bin = shutil.which("bash")
+                self.Con.info(
+                    "Running the build system using '",
+                    shell_bin,
+                    "': '" + "' '".join(build_system_args) + "'",
+                )
+
+                retcode = -100500
+                if "linux" == sys.platform:
+                    if not shell_bin:
+                        shell_bin = shutil.which("sh")
+                    if shell_bin:
+                        args = [
+                            shell_bin,
+                            "-c",
+                            " ".join([shlex.quote(s) for s in build_system_args]),
+                        ]
+                    else:
+                        self.Con.warning(
+                            "Failed to find 'bash' or 'sh' shell, will run build command directly"
+                        )
+                        args = build_system_args
+
+                    self.Con.yacce_end()
+
+                    cwd = os.getcwd()
+                    try:
+                        os.chdir(self._workspace_dir)
+                        retcode = pty.spawn(args)
+                    finally:
+                        os.chdir(cwd)
+
+                else:
+                    self.Con.yacce_end()
+                    retcode = subprocess.run(
+                        build_system_args,
+                        cwd=self._workspace_dir,
+                        check=False,
+                        shell=True,
+                        executable=shell_bin,
+                    ).returncode
+
+                self.Con.yacce_begin()
+                shown_begin = True
+
+                if retcode != 0:
+                    raise YacceException(f"Build system exited with code {retcode}.")
+
+            except Exception as e:
+                if not shown_begin:
+                    self.Con.yacce_begin()
+                    shown_begin = True
+                raise YacceException(f"Failed to run the build system: {e}")
+
+            finally:
+                if not shown_begin:
+                    self.Con.yacce_begin()
+                    shown_begin = True
+                self.Con.debug("Stopping strace.")
+                strace.send_signal(signal.SIGINT)
+
+                self.Con.debug("Waiting for completion...")
+                _, stderr = strace.communicate()
+                self.Con.debug("Strace finished.")
+                if stderr:
+                    stderr = stderr.decode("utf-8").rstrip()
+                    self.Con.warning(
+                        "'strace' produced output to stderr which might indicate problems. STDERR =",
+                        stderr,
+                    )
+
+                if "never" == keep_log:
+                    if os.path.exists(log_file):
+                        self.Con.debug(f"Removing log file '{log_file}' as requested.")
+                        os.remove(log_file)
 
 
 def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list) -> int:
