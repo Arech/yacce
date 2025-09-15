@@ -609,7 +609,7 @@ class BazelWrap:
                 "--status=successful",
                 "--string-limit=8192",
                 "--absolute-timestamps=format:unix,precision:us",
-                "--quiet=attach,personality,exit",  # reducing unnecessary output to stderr
+                # "--quiet=attach,personality,exit",  # reducing unnecessary output to stderr
                 f"--attach={server_pid}",
                 f"--output={log_file}",
             ]
@@ -622,7 +622,8 @@ class BazelWrap:
                 strace_cmd,
                 cwd=self._workspace_dir,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,  # unfortunately strace outputs everything to stderr
+                stderr=subprocess.PIPE,
+                #DEVNULL,  # unfortunately strace outputs everything to stderr
             )
             retcode = strace_proc.poll()
             if retcode is not None:
@@ -707,14 +708,16 @@ class BazelWrap:
                 strace.send_signal(signal.SIGINT)
 
                 self.Con.debug("Waiting for completion...")
-                _, stderr = strace.communicate()
+                #_, stderr = strace.communicate()
+                strace.wait()
                 self.Con.debug("Strace finished.")
+                """
                 if stderr:
                     stderr = stderr.decode("utf-8").rstrip()
                     self.Con.warning(
                         "'strace' produced output to stderr which might indicate problems. STDERR =",
                         stderr,
-                    )
+                    )"""
 
                 if "never" == keep_log:
                     if os.path.exists(log_file):
@@ -735,8 +738,6 @@ def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: lis
 
     # Only after finishing the build we could query bazel properties. Updating args.cwd from bazel
     bzl.fixCwdAsExecutionRoot(args)
-
-    raise NotImplementedError("dbg stop")
 
     p = BazelParser(Con, args)
 
