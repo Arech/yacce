@@ -123,6 +123,13 @@ def _getArgs(
         "for the 'bazel --from_log' mode of yacce specifies '$(bazel info execution_root)' directory.",
     )
 
+    parser.add_argument(
+        "--build_shell",
+        default="bash",
+        help="Build command is executed by passing it to a shell. By default, '%(default)s' is "
+        "used, but you can override it with this option.",
+    )
+
     parser = addCommonCliArgs(
         parser,
         {
@@ -402,15 +409,18 @@ class BazelWrap:
 
     def __init__(self, Con: LoggingConsole, args: argparse.Namespace):
         """Initializes the runner."""
+        # here we define only a bare minimum of vars needed to service all public methods.
         self.Con = Con
 
-        assert args.bazel_command and args.bazel_workspace and hasattr(args, "from_log")
+        assert args.bazel_command and args.bazel_workspace
+        assert hasattr(args, "from_log") and hasattr(args, "build_cwd")
         self._bazel: str = args.bazel_command
 
         args.bazel_workspace = os.path.realpath(args.bazel_workspace)
         if not os.path.isdir(args.bazel_workspace):
             raise YacceException(
-                f"Bazel workspace directory '{args.bazel_workspace}' doesn't exist"
+                f"Bazel workspace directory '{args.bazel_workspace}' doesn't exist.\n"
+                "Consider checking value of --bazel_workspace argument."
             )
         self._workspace_dir: str = args.bazel_workspace
 
@@ -424,12 +434,13 @@ class BazelWrap:
             path = os.environ.get("PATH", "")
             if not path:
                 path = os.defpath
-            path = self._workspace_dir + os.pathsep + os.getcwd() + os.pathsep + path
+            path = self._workspace_dir + os.pathsep + path
             self._path = path
         return self._path
 
     def _resolveBinaryPath(self, binary: str) -> str:
         """Resolves the path to the binary, if necessary."""
+        self.Con.debug(f"Resolving absolute path to '{binary}' executable...")
         if not os.path.isabs(binary):
             path = self._getPath()
             binary_path = shutil.which(binary, path=path)
@@ -501,8 +512,16 @@ class BazelWrap:
     def _checkBazel(self) -> None:
         if not self._bazel_tested:
             assert self._bazel and self._workspace_dir  # doing this once
-            self._bazel = self._resolveBinaryPath(self._bazel)
-            self.Con.debug("Checking if '", self._bazel, "' works in:", self._workspace_dir)
+            try:
+                self._bazel = self._resolveBinaryPath(self._bazel)
+            except YacceException as e:
+                raise YacceException(
+                    f"{e}\nIf your basel workspace differs from current directory and you have "
+                    "set --bazel_workspace parameter to point to it properly, either you have to "
+                    "invoke a custom bazel binary (i.e. set --bazel_command argument) or "
+                    "better just install bazelisk."
+                )
+            self.Con.info("Checking if '", self._bazel, "' works in:", self._workspace_dir)
             try:
                 v = self._queryBazelThrow("--version")
                 self.Con.info(
@@ -521,6 +540,26 @@ class BazelWrap:
         assert len(build_system_args) > 0
 
         assert args.log_file and args.keep_log
+
+        if args.build_cwd:
+            args.build_cwd = os.path.realpath(args.build_cwd)
+            if not os.path.isdir(args.build_cwd):
+                raise YacceException(
+                    f"Build system working directory '{args.build_cwd}' doesn't exist.\n"
+                    "Consider checking value of --build_cwd argument."
+                )
+        else:
+            args.build_cwd = self._workspace_dir
+
+        if args.build_shell:
+            shell_path = shutil.which(args.build_shell)
+            if not shell_path:
+                raise YacceException(
+                    f"Failed to find specified build shell '{args.build_shell}' in PATH."
+                )
+            args.build_shell = shell_path
+            self.Con.debug(f"Using '{args.build_shell}' as a shell to run the build command.")
+
         # making sure the log file is absolute path to mitigate cwd changes in strace
         args.log_file = os.path.realpath(args.log_file)
         if os.path.exists(args.log_file):
@@ -532,7 +571,7 @@ class BazelWrap:
 
         self._handleClean(args)
 
-        self._runBazelWithStrace(args.log_file, args.keep_log, build_system_args)
+        self._runBazelWithStrace(args.log_file, args.keep_log, build_system_args, args.build_cwd, args.build_shell)
 
     def _handleClean(self, args: argparse.Namespace) -> None:
         if args.clean is None:
@@ -554,8 +593,14 @@ class BazelWrap:
 
     def _checkStrace(self) -> None:
         assert self._workspace_dir
-        self._strace = self._resolveBinaryPath("strace")
-        self.Con.debug("Checking if 'strace' is available in:", self._workspace_dir)
+        try:
+            self._strace = self._resolveBinaryPath("strace")
+        except YacceException as e:
+            raise YacceException(
+                f"{e}\nProbably the easiest way to install it is via your package manager, such as "
+                "'apt install strace' or similar."
+            )
+        self.Con.info("Checking if '", self._strace, "' is available in:", self._workspace_dir)
         try:
             run_res = subprocess.run(
                 [self._strace, "--version"],
@@ -609,7 +654,6 @@ class BazelWrap:
                 "--status=successful",
                 "--string-limit=8192",
                 "--absolute-timestamps=format:unix,precision:us",
-                # "--quiet=attach,personality,exit",  # reducing unnecessary output to stderr
                 f"--attach={server_pid}",
                 f"--output={log_file}",
             ]
@@ -622,8 +666,8 @@ class BazelWrap:
                 strace_cmd,
                 cwd=self._workspace_dir,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                #DEVNULL,  # unfortunately strace outputs everything to stderr
+                stderr=subprocess.DEVNULL,
+                # DEVNULL,  # unfortunately strace outputs everything to stderr
             )
             retcode = strace_proc.poll()
             if retcode is not None:
@@ -640,52 +684,42 @@ class BazelWrap:
         except Exception as e:
             raise YacceException(f"Failed to launch strace on PID {server_pid}: {e}")
 
-    def _runBazelWithStrace(self, log_file: str, keep_log: str, build_system_args: list) -> None:
+    def _runBazelWithStrace(
+        self, log_file: str, keep_log: str, build_system_args: list, build_cwd: str, build_shell:str
+    ) -> None:
+        assert log_file and build_system_args and build_cwd and build_shell
         server_pid = self._getBazelServerPid()
 
         shown_begin = False
         with self._launchStrace(server_pid, log_file) as strace:
             try:
-                shell_bin = shutil.which("bash")
+                build_system_str = " ".join([shlex.quote(s) for s in build_system_args])
                 self.Con.info(
-                    "Running the build system using '",
-                    shell_bin,
-                    "': '" + "' '".join(build_system_args) + "'",
+                    "Running the build system from '",
+                    build_shell,
+                    " in directory '",
+                    build_cwd,
+                    "' with command '",
+                    build_system_str,
+                    "'",
                 )
-
                 retcode = -100500
                 if "linux" == sys.platform:
-                    if not shell_bin:
-                        shell_bin = shutil.which("sh")
-                    if shell_bin:
-                        args = [
-                            shell_bin,
-                            "-c",
-                            " ".join([shlex.quote(s) for s in build_system_args]),
-                        ]
-                    else:
-                        self.Con.warning(
-                            "Failed to find 'bash' or 'sh' shell, will run build command directly"
-                        )
-                        args = build_system_args
-
                     self.Con.yacce_end()
-
                     cwd = os.getcwd()
+                    os.chdir(build_cwd)
                     try:
-                        os.chdir(self._workspace_dir)
-                        retcode = pty.spawn(args)
+                        retcode = pty.spawn([build_shell, "-c", build_system_str])
                     finally:
                         os.chdir(cwd)
-
                 else:
                     self.Con.yacce_end()
                     retcode = subprocess.run(
                         build_system_args,
-                        cwd=self._workspace_dir,
+                        cwd=build_cwd,
                         check=False,
                         shell=True,
-                        executable=shell_bin,
+                        executable=build_shell,
                     ).returncode
 
                 self.Con.yacce_begin()
@@ -708,7 +742,7 @@ class BazelWrap:
                 strace.send_signal(signal.SIGINT)
 
                 self.Con.debug("Waiting for completion...")
-                #_, stderr = strace.communicate()
+                # _, stderr = strace.communicate()
                 strace.wait()
                 self.Con.debug("Strace finished.")
                 """
