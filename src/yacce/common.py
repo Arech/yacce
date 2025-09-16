@@ -894,8 +894,7 @@ class BaseParser:
             else:
                 self.Con.error(
                     f"Line {line_num}: pid {pid} has @file argument#{i} '{args[i]}' that doesn't "
-                    "reference existing file. Can't read it and hence the processing won't be "
-                    "correct."
+                    "reference existing file. Processing might yield incomplete results."
                 )
                 # do nothing
         return args
