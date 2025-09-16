@@ -29,11 +29,21 @@ class LoggingConsole(rich.console.Console):
     def __init__(self, log_level: LogLevel = LogLevel.Trace, **kwargs):
         assert isinstance(log_level, LoggingConsole.LogLevel)
         self.log_level = log_level
+        self._n_errors:int = 0
         if "emoji" not in kwargs:
             kwargs["emoji"] = False
         if "highlight" not in kwargs:
             kwargs["highlight"] = False
         super().__init__(**kwargs)
+
+    def cleanNumErrors(self)->int:
+        r = self._n_errors
+        self._n_errors = 0
+        return r
+    
+    def getNumErrors(self)->int:
+        return self._n_errors
+
 
     def _do_log(self, color: str, lvl: str, *args, **kwargs):
         if "sep" in kwargs:
@@ -67,16 +77,19 @@ class LoggingConsole(rich.console.Console):
         return self._do_log("yellow", "warn", *args, **kwargs)
 
     def error(self, *args, **kwargs):
+        self._n_errors += 1
         if self.log_level > LoggingConsole.LogLevel.Error:
             return None
         return self._do_log("red", "Err", *args, **kwargs)
 
     def failure(self, *args, **kwargs):
+        self._n_errors += 1
         if self.log_level > LoggingConsole.LogLevel.Failure:
             return None
         return self._do_log("bright_red", "FAIL", *args, **kwargs)
 
     def critical(self, *args, **kwargs):
+        self._n_errors += 1
         if self.log_level > LoggingConsole.LogLevel.Critical:
             return None
         return self._do_log("bright_magenta", "CRIT", *args, **kwargs)
@@ -104,11 +117,12 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         "yacce will try to test if mentioned files exist in this directory and warn if they aren't, "
         "but passing files existence test alone doesn't guarantee that the resulting compile_commands.json will be correct."
         + addendums.get("cwd", ""),
+        # no default as it depends on the mode
     )
 
     parser.add_argument(
         "--ignore-not-found",
-        help="If set, will not test if files to be added to compile_commands.json exist. Default: %(default)s",
+        help="If set, will not test if files to be added to .json exists. Default: %(default)s.",
         action=argparse.BooleanOptionalAction,
         default=False,
     )

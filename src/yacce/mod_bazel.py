@@ -130,13 +130,23 @@ def _getArgs(
         "used, but you can override it with this option.",
     )
 
+    parser.add_argument(
+        "--ensure_build_succeeds",
+        help="By default yacce will only warn if the build command fails (exits with non-zero code) "
+        "and it will try to process the strace log file and produce some result anyway. If you want to "
+        "make sure that yacce will only use complete log of a successful build, set this option to "
+        "enforce yacce failure if build fails.",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+
     parser = addCommonCliArgs(
         parser,
         {
-            "cwd": " Set this to override output of $(bazel info execution_root) for parsing "
-            "existing log without running bazel itself. If the build system has to be run, "
-            "this argument is either has to be unset, or match to the output of $(bazel info execution_root).",
-            "dest_dir": " If set, the resulting .json files will be stored into this dir instead of bazel workspace directory.",
+            "cwd": " Set this to override output of '$(bazel info execution_root)' for parsing "
+            "existing log without quering bazel. If the build command has to be run, "
+            "this argument is either has to be unset, or match to the output of '$(bazel info execution_root)'.",
+            "dest_dir": " Default: directory of the log file (see --log_file)",
         },
     )
 
@@ -369,7 +379,8 @@ class BazelParser(BaseParser):
         self._new_cc = new_ccs
         self._new_cc_time = new_ccs_time
 
-    def storeJsons(self, dest_dir: str, save_duration: bool, save_line_num: bool):
+    def storeJsons(self, dest_dir: str, external:str, save_duration: bool, save_line_num: bool):
+
         super().storeJsons(dest_dir, save_duration, save_line_num, sfx="_combined")
         storeJson(
             self.Con,
@@ -394,7 +405,7 @@ class BazelParser(BaseParser):
 
 
 class BazelWrap:
-    """Takes care of communicating with bazel, including running the build system with strace and
+    """Takes care of communicating with bazel, including running a build command under strace and
     producing the log file.
 
     More precisely:
@@ -416,13 +427,15 @@ class BazelWrap:
         assert hasattr(args, "from_log") and hasattr(args, "build_cwd")
         self._bazel: str = args.bazel_command
 
+        args.log_file = os.path.realpath(args.log_file)
+
         args.bazel_workspace = os.path.realpath(args.bazel_workspace)
         if not os.path.isdir(args.bazel_workspace):
             raise YacceException(
                 f"Bazel workspace directory '{args.bazel_workspace}' doesn't exist.\n"
                 "Consider checking value of --bazel_workspace argument."
             )
-        self._workspace_dir: str = args.bazel_workspace
+        self._bazel_workspace: str = args.bazel_workspace
 
         self._from_log: bool = bool(args.from_log)
         self._bazel_tested: bool = False
@@ -434,7 +447,7 @@ class BazelWrap:
             path = os.environ.get("PATH", "")
             if not path:
                 path = os.defpath
-            path = self._workspace_dir + os.pathsep + path
+            path = self._bazel_workspace + os.pathsep + path
             self._path = path
         return self._path
 
@@ -498,7 +511,7 @@ class BazelWrap:
         r = (
             subprocess.run(
                 [self._bazel, *args],
-                cwd=self._workspace_dir,
+                cwd=self._bazel_workspace,
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,  # bazel might spew lot's of useless stuff to stderr
@@ -511,7 +524,7 @@ class BazelWrap:
 
     def _checkBazel(self) -> None:
         if not self._bazel_tested:
-            assert self._bazel and self._workspace_dir  # doing this once
+            assert self._bazel and self._bazel_workspace  # doing this once
             try:
                 self._bazel = self._resolveBinaryPath(self._bazel)
             except YacceException as e:
@@ -521,16 +534,16 @@ class BazelWrap:
                     "invoke a custom bazel binary (i.e. set --bazel_command argument) or "
                     "better just install bazelisk."
                 )
-            self.Con.info("Checking if '", self._bazel, "' works in:", self._workspace_dir)
+            self.Con.info("Checking if '", self._bazel, "' works in:", self._bazel_workspace)
             try:
                 v = self._queryBazelThrow("--version")
                 self.Con.info(
-                    f"{v} is detected in directory: '{self._workspace_dir}' using command '{self._bazel}'"
+                    f"{v} is detected in directory: '{self._bazel_workspace}' using command '{self._bazel}'"
                 )
                 self._bazel_tested = True
             except Exception as e:
                 raise YacceException(
-                    f"Failed to run bazel ('{self._bazel}') in directory: '{self._workspace_dir}': {e}"
+                    f"Failed to run bazel ('{self._bazel}') in directory: '{self._bazel_workspace}': {e}"
                 )
 
     def runBuild(self, args: argparse.Namespace, build_system_args: list) -> None:
@@ -549,7 +562,7 @@ class BazelWrap:
                     "Consider checking value of --build_cwd argument."
                 )
         else:
-            args.build_cwd = self._workspace_dir
+            args.build_cwd = self._bazel_workspace
 
         if args.build_shell:
             shell_path = shutil.which(args.build_shell)
@@ -560,8 +573,7 @@ class BazelWrap:
             args.build_shell = shell_path
             self.Con.debug(f"Using '{args.build_shell}' as a shell to run the build command.")
 
-        # making sure the log file is absolute path to mitigate cwd changes in strace
-        args.log_file = os.path.realpath(args.log_file)
+        assert os.path.isabs(args.log_file)
         if os.path.exists(args.log_file):
             self.Con.warning(f"Log file '{args.log_file}' already exists and will be overwritten.")
             os.remove(args.log_file)
@@ -571,7 +583,14 @@ class BazelWrap:
 
         self._handleClean(args)
 
-        self._runBazelWithStrace(args.log_file, args.keep_log, build_system_args, args.build_cwd, args.build_shell)
+        self._runBazelWithStrace(
+            args.log_file,
+            args.keep_log,
+            build_system_args,
+            args.build_cwd,
+            args.build_shell,
+            args.ensure_build_succeeds,
+        )
 
     def _handleClean(self, args: argparse.Namespace) -> None:
         if args.clean is None:
@@ -592,7 +611,7 @@ class BazelWrap:
             self.Con.debug("Skipping bazel clean as requested.")
 
     def _checkStrace(self) -> None:
-        assert self._workspace_dir
+        assert self._bazel_workspace
         try:
             self._strace = self._resolveBinaryPath("strace")
         except YacceException as e:
@@ -600,11 +619,11 @@ class BazelWrap:
                 f"{e}\nProbably the easiest way to install it is via your package manager, such as "
                 "'apt install strace' or similar."
             )
-        self.Con.info("Checking if '", self._strace, "' is available in:", self._workspace_dir)
+        self.Con.info("Checking if '", self._strace, "' is available in:", self._bazel_workspace)
         try:
             run_res = subprocess.run(
                 [self._strace, "--version"],
-                cwd=self._workspace_dir,
+                cwd=self._bazel_workspace,
                 check=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -664,7 +683,7 @@ class BazelWrap:
 
             strace_proc = subprocess.Popen(
                 strace_cmd,
-                cwd=self._workspace_dir,
+                cwd=self._bazel_workspace,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 # DEVNULL,  # unfortunately strace outputs everything to stderr
@@ -685,7 +704,13 @@ class BazelWrap:
             raise YacceException(f"Failed to launch strace on PID {server_pid}: {e}")
 
     def _runBazelWithStrace(
-        self, log_file: str, keep_log: str, build_system_args: list, build_cwd: str, build_shell:str
+        self,
+        log_file: str,
+        keep_log: str,
+        build_system_args: list,
+        build_cwd: str,
+        build_shell: str,
+        ensure_build_succeeds: bool,
     ) -> None:
         assert log_file and build_system_args and build_cwd and build_shell
         server_pid = self._getBazelServerPid()
@@ -695,11 +720,11 @@ class BazelWrap:
             try:
                 build_system_str = " ".join([shlex.quote(s) for s in build_system_args])
                 self.Con.info(
-                    "Running the build system from '",
+                    "Running build from shell '",
                     build_shell,
-                    " in directory '",
+                    ", directory '",
                     build_cwd,
-                    "' with command '",
+                    "' command '",
                     build_system_str,
                     "'",
                 )
@@ -710,29 +735,54 @@ class BazelWrap:
                     os.chdir(build_cwd)
                     try:
                         retcode = pty.spawn([build_shell, "-c", build_system_str])
+                    except KeyboardInterrupt:
+                        self.Con.yacce_begin()
+                        shown_begin = True
+                        self.Con.warning(
+                            "Build interrupted by user. If you want to abort yacce too, please Ctrl-C again."
+                        )
+                        retcode = -1
                     finally:
                         os.chdir(cwd)
                 else:
                     self.Con.yacce_end()
-                    retcode = subprocess.run(
-                        build_system_args,
-                        cwd=build_cwd,
-                        check=False,
-                        shell=True,
-                        executable=build_shell,
-                    ).returncode
+                    try:
+                        retcode = subprocess.run(
+                            build_system_args,
+                            cwd=build_cwd,
+                            check=False,
+                            shell=True,
+                            executable=build_shell,
+                        ).returncode
+                    except KeyboardInterrupt:
+                        self.Con.yacce_begin()
+                        shown_begin = True
+                        self.Con.warning(
+                            "Build interrupted by user. If you want to abort yacce too, please Ctrl-C again."
+                        )
+                        retcode = -1
 
-                self.Con.yacce_begin()
-                shown_begin = True
+                if not shown_begin:
+                    self.Con.yacce_begin()
+                    shown_begin = True
 
                 if retcode != 0:
-                    raise YacceException(f"Build system exited with code {retcode}.")
+                    msg = f"Build command exited with code {retcode}."
+                    if ensure_build_succeeds:
+                        raise YacceException(
+                            f"{msg} Yacce was requested to ensure build succeeds, so aborting. "
+                            "If you want to proceed anyway, don't set --ensure_build_succeeds argument."
+                        )
+                    self.Con.warning(
+                        f"{msg} Processing the log anyway even though the log might be incomplete "
+                        "or corrupted. To enforce yacce failure if build fails, set --ensure_build_succeeds argument."
+                    )
 
             except Exception as e:
                 if not shown_begin:
                     self.Con.yacce_begin()
                     shown_begin = True
-                raise YacceException(f"Failed to run the build system: {e}")
+                raise YacceException(f"Failed to run the build command: {e}")
 
             finally:
                 if not shown_begin:
@@ -755,7 +805,9 @@ class BazelWrap:
 
                 if "never" == keep_log:
                     if os.path.exists(log_file):
-                        self.Con.debug(f"Removing log file '{log_file}' as requested.")
+                        self.Con.info(
+                            f"Removing log file '{log_file}' as requested by --keep_log=never."
+                        )
                         os.remove(log_file)
 
 
@@ -764,6 +816,7 @@ def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: lis
 
     Con.debug("bazel mode args: ", args)
     Con.debug("build_system_args:", build_system_args)
+    Con.cleanNumErrors()
 
     bzl = BazelWrap(Con, args)
 
@@ -777,7 +830,25 @@ def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: lis
 
     # TODO proper handling of args.external
     dest_dir = (
-        args.dest_dir if hasattr(args, "dest_dir") and args.dest_dir else args.bazel_workspace
+        args.dest_dir
+        if hasattr(args, "dest_dir") and args.dest_dir
+        else os.path.dirname(args.log_file)
     )
-    p.storeJsons(dest_dir, args.save_duration, args.save_line_num)
+    p.storeJsons(dest_dir, args.external, args.save_duration, args.save_line_num)
+
+    # 'never' has already been processed and 'always' basically mean 'forget it'
+    if not args.from_log and args.keep_log == "if_errors":
+        if Con.getNumErrors() > 0:
+            Con.info(
+                "There were",
+                Con.getNumErrors(),
+                "reported during the run, hence according to --keep_log=if_errors, leaving the log file '",
+                args.log_file,
+                "' in place",
+            )
+        else:
+            if os.path.exists(args.log_file):
+                Con.info("No errors were detected, hence removing log file '", args.log_file, "'")
+                os.remove(args.log_file)
+
     return 0
