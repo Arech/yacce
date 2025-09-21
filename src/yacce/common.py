@@ -29,21 +29,20 @@ class LoggingConsole(rich.console.Console):
     def __init__(self, log_level: LogLevel = LogLevel.Trace, **kwargs):
         assert isinstance(log_level, LoggingConsole.LogLevel)
         self.log_level = log_level
-        self._n_errors:int = 0
+        self._n_errors: int = 0
         if "emoji" not in kwargs:
             kwargs["emoji"] = False
         if "highlight" not in kwargs:
             kwargs["highlight"] = False
         super().__init__(**kwargs)
 
-    def cleanNumErrors(self)->int:
+    def cleanNumErrors(self) -> int:
         r = self._n_errors
         self._n_errors = 0
         return r
-    
-    def getNumErrors(self)->int:
-        return self._n_errors
 
+    def getNumErrors(self) -> int:
+        return self._n_errors
 
     def _do_log(self, color: str, lvl: str, *args, **kwargs):
         if "sep" in kwargs:
@@ -176,6 +175,15 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         'Pass an empty string "" to disable.',
         nargs="*",
         default=[""],
+    )
+
+    parser.add_argument(
+        "--discard_args_with_pfx",
+        help="Certain compiler arguments, such as sanitizers, are known to choke clangd. Set value "
+        "of this parameter to a sequence of prefixes to match and remove such compiler arguments "
+        'from the list. Default: %(default)s. Pass an empty string "" to disable.',
+        nargs="*",
+        default=["-fsanitize"],
     )
 
     parser.add_argument(
@@ -460,6 +468,7 @@ class BaseParser:
         self._discard_sources_with_pfx = tuple(
             s for s in args.discard_sources_with_pfx if len(s) > 0
         )
+        self._discard_args_with_pfx = tuple(s for s in args.discard_args_with_pfx if len(s) > 0)
         self._do_dupes_check = args.enable_dupes_check
 
         if self._test_files and not os.path.isdir(self._cwd):
@@ -491,6 +500,7 @@ class BaseParser:
         self._seen_other: dict[str | None, tuple[str, int]] = {}  # just output->(args_str,line_num)
 
         self._unsupported_args = set()  # set of found unsupported args
+        self._dropped_args = set()  # for report on which args were dropped
 
         with rich.progress.open(
             log_file, "r", description="Parsing strace log file...", console=self.Con
@@ -573,6 +583,15 @@ class BaseParser:
             if self._do_other:
                 self.Con.print(n_lc, "other commands found")
 
+        if self._dropped_args:
+            self.Con.info(
+                f"Compiler arguments from the following set of {len(self._dropped_args)} were "
+                "removed according to --discard_args_with_pfx specification (",
+                self._discard_args_with_pfx,
+                "): ",
+                sorted(self._dropped_args),
+            )
+
         if self._unsupported_args:
             self.Con.warning(
                 f"Found use of {len(self._unsupported_args)} unsupported arguments: {sorted(self._unsupported_args)}. "
@@ -581,9 +600,11 @@ class BaseParser:
             )
 
         # cleanup
-        del self._seen_compile
-        del self._seen_other
+        del self._dropped_args
         del self._unsupported_args
+        del self._seen_other
+        del self._seen_compile
+        
 
     def _handleExit(self, pid: int, ts: float, exit_code: str | None, line_num: int) -> None:
         # negative exit code means the process termination was not found in the log
@@ -699,7 +720,8 @@ class BaseParser:
         next_is_path = False
         next_is_output = False
         arg_output = None
-        sources = []
+        sources: list[str] = []
+        discard_arg_idx: list[int] = []
 
         for idx, arg in enumerate(args):
             # TODO argument blacklist
@@ -744,18 +766,13 @@ class BaseParser:
                 and args[idx - 1] not in self.kArgIsNotSource
             ):
                 sources.append(arg)
-            # TODO parsing combined args like --sysroot=/path
-            """elif do_test_files and arg.startswith((
-                "-I",
-                "--include-directory=",
-                "-isystem",
-                "-iquote",
-                "-isysroot",
-                "--sysroot=",
-                "-cxx-isystem"
-            )):
-                # TODO
-                pass"""
+            elif self._discard_args_with_pfx and arg.startswith(self._discard_args_with_pfx):
+                self._dropped_args.add(arg)
+                discard_arg_idx.append(idx)
+
+        if discard_arg_idx:
+            for i in reversed(discard_arg_idx):
+                del args[i]
 
         n_sources = len(sources)
         is_other = n_sources == 0
