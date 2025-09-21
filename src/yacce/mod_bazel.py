@@ -1,4 +1,5 @@
 import argparse
+import itertools
 import os
 import re
 from rich.progress import Progress
@@ -311,13 +312,13 @@ class BazelParser(BaseParser):
                 source = escapePath(path)
                 # no need to check and update output
 
-                new_args = []
+                # new_args = []
                 next_is_path = False
                 for argidx, arg in enumerate(args):
                     # resolving symlinks to reduce dependency on bazel's internal workspace structure
                     if next_is_path:
                         next_is_path = False
-                        arg = _fix_path(arg, argidx, args)
+                        args[argidx] = _fix_path(arg, argidx, args)                        
                     elif arg in self.kArgIsPath and (
                         arg not in self.kCheckArgForSysrootSpec
                         or not arg.startswith(self.kSysrootSpec)
@@ -326,11 +327,11 @@ class BazelParser(BaseParser):
                     elif m_pfx_arg := self.r_pfx_arg_is_path.match(arg):
                         path_part = arg[m_pfx_arg.end() :]
                         if path_part:
-                            arg = m_pfx_arg.group() + _fix_path(path_part, argidx, None)
+                            args[argidx] = m_pfx_arg.group() + _fix_path(path_part, argidx, None)
+                    # new_args.append(arg)
 
-                    new_args.append(arg)
-
-                new_cc = CompileCommand(new_args, output, source, line_num)
+                # new_cc = CompileCommand(new_args, output, source, line_num)
+                new_cc = CompileCommand(args, output, source, line_num)
                 if m_external:
                     ext_ccs.setdefault(repo, []).append(new_cc)
                     ext_cctimes.setdefault(repo, []).append(cctime)
@@ -374,13 +375,16 @@ class BazelParser(BaseParser):
         self._ext_paths = ext_paths
         self._ext_ccs = ext_ccs
         self._ext_cctimes = ext_cctimes
-        # TODO other commands!
-
         self._new_cc = new_ccs
         self._new_cc_time = new_ccs_time
 
-    def storeJsons(self, dest_dir: str, external:str, save_duration: bool, save_line_num: bool):
+        # merging processed list back into the base class list storage
+        self.compile_commands = list(itertools.chain(new_ccs, *ext_ccs.values()))
+        self.compile_cmd_time = list(itertools.chain(new_ccs_time, *ext_cctimes.values()))
+        
+        # TODO other commands!
 
+    def storeJsons(self, dest_dir: str, external: str, save_duration: bool, save_line_num: bool):
         super().storeJsons(dest_dir, save_duration, save_line_num, sfx="_combined")
         storeJson(
             self.Con,

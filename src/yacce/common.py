@@ -179,11 +179,12 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
 
     parser.add_argument(
         "--discard_args_with_pfx",
-        help="Certain compiler arguments, such as sanitizers, are known to choke clangd. Set value "
+        help="Certain compiler arguments, such as sanitizers, are known to choke clangd. Some other "
+        "are useless for C++ symbols. Set value "
         "of this parameter to a sequence of prefixes to match and remove such compiler arguments "
         'from the list. Default: %(default)s. Pass an empty string "" to disable.',
         nargs="*",
-        default=["-fsanitize"],
+        default=["-fsanitize", "-frandom-seed=", "-D__DATE__=", "-D__TIMESTAMP__=", "-D__TIME__="],
     )
 
     parser.add_argument(
@@ -500,7 +501,7 @@ class BaseParser:
         self._seen_other: dict[str | None, tuple[str, int]] = {}  # just output->(args_str,line_num)
 
         self._unsupported_args = set()  # set of found unsupported args
-        self._dropped_args = set()  # for report on which args were dropped
+        self._num_dropped_args = 0  # for a report on how many args were dropped
 
         with rich.progress.open(
             log_file, "r", description="Parsing strace log file...", console=self.Con
@@ -583,13 +584,12 @@ class BaseParser:
             if self._do_other:
                 self.Con.print(n_lc, "other commands found")
 
-        if self._dropped_args:
+        if self._num_dropped_args:
             self.Con.info(
-                f"Compiler arguments from the following set of {len(self._dropped_args)} were "
-                "removed according to --discard_args_with_pfx specification (",
+                "In total ",
+                self._num_dropped_args,
+                "compiler arguments were removed according to the following --discard_args_with_pfx specification:",
                 self._discard_args_with_pfx,
-                "): ",
-                sorted(self._dropped_args),
             )
 
         if self._unsupported_args:
@@ -600,11 +600,10 @@ class BaseParser:
             )
 
         # cleanup
-        del self._dropped_args
+        del self._num_dropped_args
         del self._unsupported_args
         del self._seen_other
         del self._seen_compile
-        
 
     def _handleExit(self, pid: int, ts: float, exit_code: str | None, line_num: int) -> None:
         # negative exit code means the process termination was not found in the log
@@ -767,7 +766,7 @@ class BaseParser:
             ):
                 sources.append(arg)
             elif self._discard_args_with_pfx and arg.startswith(self._discard_args_with_pfx):
-                self._dropped_args.add(arg)
+                self._num_dropped_args += 1
                 discard_arg_idx.append(idx)
 
         if discard_arg_idx:
