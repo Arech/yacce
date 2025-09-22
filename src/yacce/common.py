@@ -134,7 +134,7 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         "assembler sources, or for linking), that aren't useful for gathering C++ symbol information "
         "of the project, but handy to get insights about the build in general. Default: %(default)s",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
     )
 
     parser.add_argument(

@@ -79,22 +79,29 @@ def _getArgs(
 
     parser.add_argument(
         "--external",
-        choices=["ignore", "combine-with-overridden", "to-files", "to-external"],
+        choices=["ignore", "combine-with-overridden", "to-files", "to-external", "combine-all"],
         default="combine-with-overridden",
         help="Determines what to do when a compilation of a project's dependency (from 'external/' "
-        "subdirectory) is found. One option is to just 'ignore' it and leave in resulting "
-        "compile_commands.json only commands related to the project. "
-        "Default option 'combine-with-overridden' produces a single compile_commands.json containing "
-        "main project files as well as dependencies that are resolved to be stored outside of their "
-        "usual location '$(bazel info output_base)/external/<repo>' (this typically happens when you "
-        "override a repo location for bazel to work simultaneously on the project and its dependency). "
+        "subdirectory) is found. One option is to just 'ignore' it and leave in the resulting "
+        "compile_commands.json *only* commands related to the project directly. "
+        "The default option 'combine-with-overridden' produces a single compile_commands.json containing "
+        "main project files as well as dependencies that are found to be stored *outside* of their "
+        "expected location at '$(bazel info output_base)/external/<repo>' (this typically happens when you "
+        "override a dependency repo location for bazel, when you work on the project and its dependency simultaneously). "
         "Option 'to-files' produces individual files nearby the main compile_commands.json, named like"
         "compile_commands_ext_<repo>.json for each external dependency <repo> (this might be useful "
-        "for manual inspection/combination). The last option "
-        "'to-external' produces an individual compile_commands.json in each external dependency's "
-        "directory and is useful for investigating dependencies compilation. "
-        "By default, compile_commands.json will be saved to the bazel workspace directory (see the "
-        "--bazel_workspace argument), but this could be overridden with --dest_dir argument.",
+        "for manual inspection/combination). Option "
+        "'to-external' differs from 'to-files' only in the location and naming of the resulting files. "
+        "This value produces an individual compile_commands.json in each external dependency's "
+        "directory and is useful when you open the dependency directory in a parallel IDE for close inspection. "
+        "The last 'combine-all' option just writes all found compilation commands (for the main project and its "
+        "dependencies) into a single file. "
+        "See --dest_dir argument for a default location and/or override for the main project's compile_commands.json file. "
+        "NOTE that since currently yacce doesn't properly process compiler invocations that aren't related "
+        "to compiling C or C++ sources (such as linking only, or compiling ASM files), if --other_commands "
+        "flag is specified, a compound other_commands.json (containing all other invocations of a "
+        "compiler for the main project and its externals) will be saved nearby the main compile_commands.json "
+        "irrespective of this flag value.",
     )
     # TODO proper handling of --external and file paths
 
@@ -318,7 +325,7 @@ class BazelParser(BaseParser):
                     # resolving symlinks to reduce dependency on bazel's internal workspace structure
                     if next_is_path:
                         next_is_path = False
-                        args[argidx] = _fix_path(arg, argidx, args)                        
+                        args[argidx] = _fix_path(arg, argidx, args)
                     elif arg in self.kArgIsPath and (
                         arg not in self.kCheckArgForSysrootSpec
                         or not arg.startswith(self.kSysrootSpec)
@@ -381,30 +388,105 @@ class BazelParser(BaseParser):
         # merging processed list back into the base class list storage
         self.compile_commands = list(itertools.chain(new_ccs, *ext_ccs.values()))
         self.compile_cmd_time = list(itertools.chain(new_ccs_time, *ext_cctimes.values()))
-        
+
         # TODO other commands!
 
     def storeJsons(self, dest_dir: str, external: str, save_duration: bool, save_line_num: bool):
-        super().storeJsons(dest_dir, save_duration, save_line_num, sfx="_combined")
-        storeJson(
-            self.Con,
-            dest_dir,
-            True,
-            self._new_cc,
-            self._new_cc_time if save_duration else None,
-            self._cwd,
-            save_line_num,
-        )
-        for repo in sorted(self._ext_ccs.keys()):
+        # saving other_commands no matter what if requested
+        if self._do_other:
+            storeJson(
+                self.Con,
+                dest_dir,
+                False,
+                self.other_commands,
+                self.other_cmd_time if save_duration else None,
+                self._cwd,
+                save_line_num,
+            )
+
+        if "combine-all" == external:
             storeJson(
                 self.Con,
                 dest_dir,
                 True,
-                self._ext_ccs[repo],
-                self._ext_cctimes[repo] if save_duration else None,
+                self.compile_commands,
+                self.compile_cmd_time if save_duration else None,
                 self._cwd,
                 save_line_num,
-                f"_ext_{repo}",
+            )
+            return
+
+        if external in ("ignore", "to-files", "to-external"):
+            storeJson(
+                self.Con,
+                dest_dir,
+                True,
+                self._new_cc,
+                self._new_cc_time if save_duration else None,
+                self._cwd,
+                save_line_num,
+            )
+            if "ignore" == external:
+                return
+
+            if "to-files" == external:
+                for repo in sorted(self._ext_ccs.keys()):
+                    storeJson(
+                        self.Con,
+                        dest_dir,
+                        True,
+                        self._ext_ccs[repo],
+                        self._ext_cctimes[repo] if save_duration else None,
+                        self._cwd,
+                        save_line_num,
+                        f"_ext_{repo}",
+                    )
+            else:
+                assert "to-external" == external
+                for repo in sorted(self._ext_ccs.keys()):
+                    storeJson(
+                        self.Con,
+                        self._ext_paths[repo],
+                        True,
+                        self._ext_ccs[repo],
+                        self._ext_cctimes[repo] if save_duration else None,
+                        self._cwd,
+                        save_line_num,
+                    )
+
+        else:
+            if "combine-with-overridden" != external:
+                self.Con.warning(
+                    "Unrecognized --external=",
+                    external,
+                    "value. Assuming default 'combine-with-overridden'",
+                )
+            take_repos = {}
+            output_base = os.path.realpath(os.path.join(self._cwd, "../.."))
+            for repo in sorted(self._ext_ccs.keys()):
+                epath = self._ext_paths[repo]
+                if not epath.startswith(output_base):
+                    take_repos[repo] = epath
+            self.Con.info(
+                len(take_repos),
+                "repos:",
+                take_repos,
+                "are detected to be outside of standard location for external dependencies. "
+                "These will be saved into a combined file.",
+            )
+
+            storeJson(
+                self.Con,
+                dest_dir,
+                True,
+                list(itertools.chain(self._new_cc, *(self._ext_ccs[r] for r in take_repos))),
+                list(
+                    itertools.chain(self._new_cc_time, *(self._ext_cctimes[r] for r in take_repos))
+                )
+                if save_duration
+                else None,
+                self._cwd,
+                save_line_num,
             )
 
 
