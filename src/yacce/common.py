@@ -179,12 +179,30 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
 
     parser.add_argument(
         "--discard_args_with_pfx",
-        help="Certain compiler arguments, such as sanitizers, are known to choke clangd. Some other "
-        "are useless for C++ symbols. Set value "
+        help="Certain compiler arguments, such as sanitizers, are known to choke clangd. Some others "
+        "concerning build reproducibility are just useless for C++ symbols. Set a value "
         "of this parameter to a sequence of prefixes to match and remove such compiler arguments "
         'from the list. Default: %(default)s. Pass an empty string "" to disable.',
         nargs="*",
-        default=["-fsanitize", "-frandom-seed=", "-D__DATE__=", "-D__TIMESTAMP__=", "-D__TIME__="],
+        default=[
+            "-fsanitize"
+        ],  # , "-frandom-seed=", "-D__DATE__=", "-D__TIMESTAMP__=", "-D__TIME__="],
+    )
+
+    parser.add_argument(
+        "--discard_args",
+        help="Similarly to --discard_args_with_pfx, values for this argument define a set of "
+        "compiler arguments (such as '-DMY_DEF=VALUE') or pipe-delimited argument pairs (such as a "
+        "single token value '-I|/certain/dir' defines a two token pair '-I /certain/dir') "
+        "that will be removed from a compiler invocation. Note that a single token specification "
+        "for -D compiler argument has a special handling and also addresses its two token alternatives. "
+        "NOTE: since Python's argparse always treats a leading dash in CLI argument as an argument "
+        "name, but not value, use a plus sign '+' instead of a dash '-' to specify leading dashes "
+        "(so examples above become '+DMY_DEF=VALUE' and '+I|/certain/dir')"
+        "Default: %(default)s. "
+        'Pass an empty string "" to disable.',
+        nargs="*",
+        default=["+DADDRESS_SANITIZER"],
     )
 
     parser.add_argument(
@@ -470,6 +488,7 @@ class BaseParser:
             s for s in args.discard_sources_with_pfx if len(s) > 0
         )
         self._discard_args_with_pfx = tuple(s for s in args.discard_args_with_pfx if len(s) > 0)
+        self._discard_args = self._makeDiscardArgs(Con, args.discard_args)
         self._do_dupes_check = args.enable_dupes_check
 
         if self._test_files and not os.path.isdir(self._cwd):
@@ -490,6 +509,47 @@ class BaseParser:
 
         self._parseLog(args.log_file)
 
+    @staticmethod
+    def _makeDiscardArgs(
+        Con: LoggingConsole, discard_args: list[str] | None
+    ) -> dict[str, str | None]:
+        if not discard_args:
+            return {}
+        ret: dict[str, str | None] = {}
+
+        def _upd(n, v=None):
+            nonlocal ret
+            if n in ret and ret[n] != v:
+                Con.warning(
+                    "in parsing --discard_args: argument",
+                    n,
+                    "is already specified with value",
+                    ret[n],
+                    ". The value is replaced with",
+                    v,
+                )
+            ret[n] = v
+
+        for da in discard_args:
+            if da.startswith("++"):
+                da = "--" + da[2:]
+            elif da.startswith("+"):
+                da = "-" + da[1:]
+
+            splt = da.split("|", maxsplit=1)
+            if len(splt) == 1:
+                if da.startswith("-D"):
+                    _upd("--define-macro=" + da[2:])
+                _upd(da)
+            else:
+                assert len(splt) == 2
+                name, value = splt
+                if name == "-D":
+                    _upd("--define-macro", value)
+                _upd(name, value)
+
+        return ret
+
     def _parseLog(self, log_file: str) -> None:
         # match the start of the log string: (<pid>) (<time.stamp>) (execve|execveat|exited...)
         r_exec_or_exit = re.compile(
@@ -501,7 +561,8 @@ class BaseParser:
         self._seen_other: dict[str | None, tuple[str, int]] = {}  # just output->(args_str,line_num)
 
         self._unsupported_args = set()  # set of found unsupported args
-        self._num_dropped_args = 0  # for a report on how many args were dropped
+        self._num_dropped_args_by_pfx = 0  # for a report on how many args by pfx were dropped
+        self._num_dropped_args_by_match = 0
 
         with rich.progress.open(
             log_file, "r", description="Parsing strace log file...", console=self.Con
@@ -584,12 +645,20 @@ class BaseParser:
             if self._do_other:
                 self.Con.print(n_lc, "other commands found")
 
-        if self._num_dropped_args:
+        if self._num_dropped_args_by_pfx:
             self.Con.info(
                 "In total ",
-                self._num_dropped_args,
+                self._num_dropped_args_by_pfx,
                 "compiler arguments were removed according to the following --discard_args_with_pfx specification:",
                 self._discard_args_with_pfx,
+            )
+
+        if self._num_dropped_args_by_match:
+            self.Con.info(
+                "In total ",
+                self._num_dropped_args_by_match,
+                "compiler arguments were removed according to the following --discard_args specification:",
+                self._discard_args,
             )
 
         if self._unsupported_args:
@@ -600,7 +669,8 @@ class BaseParser:
             )
 
         # cleanup
-        del self._num_dropped_args
+        del self._num_dropped_args_by_match
+        del self._num_dropped_args_by_pfx
         del self._unsupported_args
         del self._seen_other
         del self._seen_compile
@@ -722,9 +792,12 @@ class BaseParser:
         sources: list[str] = []
         discard_arg_idx: list[int] = []
 
+        skip_next = False
         for idx, arg in enumerate(args):
-            # TODO argument blacklist
-            if next_is_path:
+            if skip_next:
+                skip_next = False
+                continue
+            elif next_is_path:  # no point to check anything if it's set
                 next_is_path = False
                 self._testPathExists(arg, line_num, pid, args_str)
                 if next_is_output:
@@ -735,7 +808,27 @@ class BaseParser:
                             f"This is unusual, taking the last one. Full command args are: {args_str}"
                         )
                     arg_output = arg  # it's already escaped
-            elif arg in self.kArgIsPath and (
+                continue
+            elif self._discard_args_with_pfx and arg.startswith(self._discard_args_with_pfx):
+                # argument blacklist is the first check
+                self._num_dropped_args_by_pfx += 1
+                discard_arg_idx.append(idx)
+                continue
+            elif arg in self._discard_args:
+                discard_val = self._discard_args[arg]
+                if discard_val is None:
+                    self._num_dropped_args_by_match += 1
+                    discard_arg_idx.append(idx)
+                    continue
+                else:
+                    if idx + 1 < len(args) and discard_val == args[idx + 1]:
+                        self._num_dropped_args_by_match += 2
+                        discard_arg_idx.extend([idx, idx + 1])
+                        skip_next = True
+                        continue
+                    # else fall below
+
+            if arg in self.kArgIsPath and (
                 arg not in self.kCheckArgForSysrootSpec or not arg.startswith(self.kSysrootSpec)
             ):  # do nothing for sysroot spec, as it's a subdir of tested -sysroot
                 next_is_path = True
@@ -765,9 +858,6 @@ class BaseParser:
                 and args[idx - 1] not in self.kArgIsNotSource
             ):
                 sources.append(arg)
-            elif self._discard_args_with_pfx and arg.startswith(self._discard_args_with_pfx):
-                self._num_dropped_args += 1
-                discard_arg_idx.append(idx)
 
         if discard_arg_idx:
             for i in reversed(discard_arg_idx):
