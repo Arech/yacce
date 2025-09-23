@@ -64,7 +64,7 @@ def _getArgs(
         "--keep_log",
         choices=["if_errors", "always", "never"],
         help="Determines if the strace log file should remain to exist after yacce "
-        "finishes. Default is 'if_errors'. Mutually exclusive with --from_log.",
+        "finishes. Default is 'always'. Mutually exclusive with --from_log.",
     )
     excl2 |= {"clean"}
     p_live.add_argument(
@@ -186,7 +186,7 @@ def _getArgs(
         sys.exit(2)
     # taking care of defaults that weren't set due to mutual exclusion check. argparse is a crap too
     if args.keep_log is None:
-        setattr(args, "keep_log", "if_errors")
+        setattr(args, "keep_log", "always")
     # leaving .clean untouched so we could later ask the user
     # if args.clean is None:
     #    setattr(args, "clean", "always")

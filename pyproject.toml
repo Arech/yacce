@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "yacce"
-version = "0.9.4"
+version = "0.9.6"
 description = "Non-intrusive bazel compile_commands.json extractor"
 readme = "README.md"
 authors = [{ name = "Aleksei Rechinskii", email = "5dpea9nhd@mozmail.com" }]
