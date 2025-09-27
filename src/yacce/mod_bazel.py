@@ -15,15 +15,15 @@ if "linux" == sys.platform:
 from .common import (
     addCommonCliArgs,
     BaseParser,
+    BetterHelpFormatter,
     CompileCommand,
     escapePath,
-    OtherCommand,
+    # OtherCommand,
     kMainDescription,
     LoggingConsole,
     makeCompilersSet,
     storeJson,
     unescapePath,
-    warnClangdIncompatibilitiesIfAny,
     YacceException,
 )
 
@@ -35,115 +35,135 @@ def _getArgs(
         prog="yacce bazel",
         description=kMainDescription
         + "\n\nMode 'bazel' is intended to generate compile_commands.json from tracing execution of "
-        "invocation of 'bazel build' or similar command, using Linux's strace utility. This mode uses "
-        "some knowledge of how bazel works to produce a correct output.",
-        usage="yacce [global options] [bazel] [options (see below)] [-- command for bash eventually invoking bazel]",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        "a 'bazel build' or any other shell command invoking 'bazel' using the Linux's strace utility. Hence it "
+        "only supports compilation of a single bazel workspace (including its all external dependencies) "
+        "happening locally. If you are using bazel's remote "
+        "caching feature, including '--disk_cache', please make sure you're starting with a clean "
+        "cache, otherwise yacce won't see compilation of cache hits.",
+        usage="yacce [global options] [bazel] [options (see below)] [-- shell command eventually invoking bazel]",
+        formatter_class=BetterHelpFormatter,
+        # argparse.RawTextHelpFormatter, #RawDescriptionHelpFormatter,
     )
 
     parser.add_argument(
         "--log_file",
-        help="Use this file for the strace log. See also '--from_log'. Default: %(default)s",
+        help="Write strace log to and/or read it from this file.\nSee also '--from_log'.\n"
+        "Default: 'strace.txt' in the current directory, %(default)s",
+        metavar="path/to/file",
         default=os.path.join(os.getcwd(), "strace.txt"),
     )
 
     p_log = parser.add_argument_group(
-        "For using existing strace log (mutually exclusive with live mode)"
+        "Log mode, uses existing strace log and is mutually exclusive with the live mode"
     )
     excl1 = {"from_log"}
     p_log.add_argument(
         "--from_log",
-        help="Toggle a mode in which yacce will only parse the log specified in --log_file, but "
-        "will not invoke any build system on its own. Mutually exclusive with --keep_log.",
+        help="Toggles a mode in which yacce will only parse an existing log file specified by '--log_file', but "
+        "will not invoke a build system to spy on.\n"
+        "Mutually exclusive with '--keep_log' and requires no build system arguments passed (no "
+        "'--' argument and anything after it).\n"
+        "Default: not set, i.e. the mode is not activated.",
         action="store_true",
     )
 
-    p_live = parser.add_argument_group("For running live bazel (mutually exclusive with log mode)")
+    p_live = parser.add_argument_group(
+        "Live mode (default), runs a bazel build system and is mutually exclusive with the log mode"
+    )
     excl2 = {"keep_log"}
     p_live.add_argument(
         "--keep_log",
         choices=["if_errors", "always", "never"],
-        help="Determines if the strace log file should remain to exist after yacce "
-        "finishes. Default is 'always'. Mutually exclusive with --from_log.",
+        help="Determines conditions of keeping of the strace log file after yacce "
+        "finishes. Mutually exclusive with '--from_log'.\n"
+        "Default is 'always' as it might be useful to run yacce in the log mode with different "
+        "arguments later on the same log file.",
     )
     excl2 |= {"clean"}
     p_live.add_argument(
         "--clean",
         choices=["always", "expunge", "never"],
-        help="Determines, if 'bazel clean' or 'bazel clean --expunge' commands are executed, or no "
-        "cleaning is done before running the build. Note that if cleaning is disabled, "
-        "cached (already compiled) sources will be invisible to yacce and hence will not "
-        "make it into resulting compiler_commands.json! If not specified, yacce will ask if running "
-        "clean is ok.",
+        help="Determines, if a 'bazel clean' or 'bazel clean --expunge' commands should be executed "
+        "before running the build.\n"
+        "Note that if cleaning is disabled, cached (already compiled) sources will be invisible to "
+        "yacce and hence will not make it into resulting compiler_commands.json! (iterative updates "
+        "aren't supported yet)\n"
+        "Default: not specified, yacce will ask if running 'bazel clean' is ok.",
     )
 
     parser.add_argument(
         "--external",
         choices=["ignore", "combine-with-overridden", "to-files", "to-external", "combine-all"],
         default="combine-with-overridden",
-        help="Determines what to do when a compilation of a project's dependency (from 'external/' "
-        "subdirectory) is found. One option is to just 'ignore' it and leave in the resulting "
-        "compile_commands.json *only* commands related to the project directly. "
-        "The default option 'combine-with-overridden' produces a single compile_commands.json containing "
-        "main project files as well as dependencies that are found to be stored *outside* of their "
+        help="Determines what to do when a compilation of a project's dependency source file (from 'external/' "
+        "subdirectory) is found.\n"
+        "- One option is to just to 'ignore' (remove) it and to leave in the resulting "
+        "compile_commands.json *only* commands directly related to the project.\n"
+        "- The default option 'combine-with-overridden' produces a single compile_commands.json containing "
+        "main project's files as well as dependencies that are stored *outside* of their "
         "expected location at '$(bazel info output_base)/external/<repo>' (this typically happens when you "
-        "override a dependency repo location for bazel, when you work on the project and its dependency simultaneously). "
-        "Option 'to-files' produces individual files nearby the main compile_commands.json, named like"
-        "compile_commands_ext_<repo>.json for each external dependency <repo> (this might be useful "
-        "for manual inspection/combination). Option "
-        "'to-external' differs from 'to-files' only in the location and naming of the resulting files. "
-        "This value produces an individual compile_commands.json in each external dependency's "
-        "directory and is useful when you open the dependency directory in a parallel IDE for close inspection. "
-        "The last 'combine-all' option just writes all found compilation commands (for the main project and its "
-        "dependencies) into a single file. "
-        "See --dest_dir argument for a default location and/or override for the main project's compile_commands.json file. "
+        "override a dependency repo location for bazel when you work on the project and its dependency simultaneously).\n"
+        "- Option 'to-files' produces individual files nearby the main compile_commands.json, named like"
+        "'compile_commands_ext_<repo>.json' for each external dependency '<repo>' (this might be useful "
+        "for manual inspection).\n"
+        "- Option 'to-external' differs from 'to-files' only in the location and naming of the resulting files. "
+        "'to-external' produces an individual compile_commands.json in each external dependency's "
+        "directory and is useful when you're going to open the dependency directory in a parallel IDE for a close inspection.\n"
+        "- The 'combine-all' option just writes all compilation commands (for the main project and its "
+        "dependencies) into a single file.\n"
+        "See '--dest_dir' argument for a default location and/or override for the main project's compile_commands.json file.\n"
         "NOTE that since currently yacce doesn't properly process compiler invocations that aren't related "
-        "to compiling C or C++ sources (such as linking only, or compiling ASM files), if --other_commands "
+        "to compiling C or C++ sources (such as linking only, or compiling ASM files), if '--other_commands' "
         "flag is specified, a compound other_commands.json (containing all other invocations of a "
         "compiler for the main project and its externals) will be saved nearby the main compile_commands.json "
-        "irrespective of this flag value.",
+        "irrespective of a value of this flag.",
     )
-    # TODO proper handling of --external and file paths
 
     parser.add_argument(
         "--bazel_command",
         default="bazel",
-        help="A command to run to communicate with instance of bazel for current build system. "
-        "It's highly recommended to use bazelisk instead of bazel. "
-        "To set workspace directory use --bazel_workspace. "
+        help="Override which command to run to communicate with the instance of bazel for the build system.\n"
+        "You don't typically need this argument, if you have bazelisk installed.\n"
+        "To set the workspace directory see '--bazel_workspace' argument.\n"
         "Default: %(default)s",
+        metavar='command_or_filepath'
     )
 
     parser.add_argument(
         "--bazel_workspace",
-        help="Overrides bazel workspace directory to set directory context for the bazel command (see "
-        "also --bazel_command). This is useful if yacce needs to be run from the outside of that "
-        "workspace. Note that any dir under real workspace would also do here. "
-        "If not set, the current working directory '%(default)s' is used.",
+        help="Overrides bazel workspace directory to set a current directory context for the bazel command (see "
+        "'--bazel_command').\n" \
+        "This is useful if yacce needs to be run from an outside of that "
+        "workspace. Note that any dir under a real workspace would also work here.\n"
+        "Default: a current working directory '%(default)s'.",
+        metavar="path/to/dir",
         default=os.getcwd(),
     )
 
     parser.add_argument(
         "--build_cwd",
         help="By default, a shell command to start the build is invoked from the bazel workspace "
-        "directory (see also --bazel_workspace). This option allows to override that and set a "
-        "different directory as a cwd for the build command. Note that this is different from --cwd option, which "
-        "for the 'bazel --from_log' mode of yacce specifies '$(bazel info execution_root)' directory.",
+        "directory (see '--bazel_workspace'). This argument allows to override that and set a "
+        "different directory as a cwd for the build command.\n" \
+        "Note that this is different from '--cwd' argument, which "
+        "for the 'bazel --from_log' mode of yacce specifies a value of '$(bazel info execution_root)' directory.",
+        metavar="path/to/dir",
     )
 
     parser.add_argument(
         "--build_shell",
         default="bash",
         help="Build command is executed by passing it to a shell. By default, '%(default)s' is "
-        "used, but you can override it with this option.",
+        "used, but you can override that with this argument.",
+        metavar="shell_to_use",
     )
 
     parser.add_argument(
         "--ensure_build_succeeds",
-        help="By default yacce will only warn if the build command fails (exits with non-zero code) "
-        "and it will try to process the strace log file and produce some result anyway. If you want to "
-        "make sure that yacce will only use complete log of a successful build, set this option to "
-        "enforce yacce failure if build fails.",
+        help="By default yacce only warns if the build command fails (exits with a non-zero code) "
+        "and it tries to process the strace log file to produce some results anyway. If you want to "
+        "make sure that yacce will only use a full log of a successful build, set this argument to "
+        "enforce yacce failure if the build fails.\n",
         action=argparse.BooleanOptionalAction,
         default=False,
     )
@@ -151,10 +171,15 @@ def _getArgs(
     parser = addCommonCliArgs(
         parser,
         {
-            "cwd": " Set this to override output of '$(bazel info execution_root)' for parsing "
-            "existing log without quering bazel. If the build command has to be run, "
-            "this argument is either has to be unset, or match to the output of '$(bazel info execution_root)'.",
-            "dest_dir": " Default: directory of the log file (see --log_file)",
+            "cwd": "In the 'yacce bazel --from_log' mode, this argument overrides an output of "
+            "'$(bazel info execution_root)' (i.e. this enables parsing of an existing log file without "
+            "querying its build system). In the default live mode (when no '--from_log' argument is "
+            "specified) this argument is either has to be unset, or match the output of '$(bazel info execution_root)'.",
+            "dest_dir": " Default: directory of the log file (see '--log_file')",
+            "other_commands": " Note that yacce currently does not implement attribution of other "
+            "compilation commands to bazel external dependencies. I.e. all other commands related to "
+            "compiling non-C++ sources and linking will be combined into a single other_commands.json "
+            "file irrespective of '--external' argument setting.",
         },
     )
 
@@ -681,10 +706,11 @@ class BazelWrap:
     def _handleClean(self, args: argparse.Namespace) -> None:
         if args.clean is None:
             ans = input(
-                "\nATTENTION!\n\n--clean argument wasn't specified. To gather all build system information, yacce "
-                "has to supervise the complete build process therefore it's recommended to run "
-                "'bazel clean' before the build to ensure all files are recompiled and hence "
-                "traced.\nDo you authorize yacce to run 'bazel clean' now? [Y/n]: "
+                "\nATTENTION!\n\n'--clean' argument wasn't specified. To gather all build system "
+                "information, yacce has to supervise the complete build process therefore it's "
+                "highly recommended to run a 'bazel clean' command before the build to ensure all "
+                "files are recompiled and hence traced.\n"
+                "Do you authorize yacce to run 'bazel clean' now? [Y/n]: "
             )
             if ans.lower() == "n":
                 args.clean = "never"
@@ -906,7 +932,13 @@ def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: lis
 
     bzl = BazelWrap(Con, args)
 
-    if not args.from_log:
+    if args.from_log:
+        if build_system_args:
+            raise YacceException(
+                "Mode '--from_log' isn't intended for running a build system. Use a live mode instead. "
+                "(see 'yacce bazel --help' for details)"
+            )
+    else:
         bzl.runBuild(args, build_system_args)
 
     # Only after finishing the build we could query bazel properties. Updating args.cwd from bazel

@@ -1,15 +1,14 @@
 import argparse
-from collections import namedtuple
 import os
 import re
 
 from .common import (
     addCommonCliArgs,
     BaseParser,
+    BetterHelpFormatter,
     kMainDescription,
     LoggingConsole,
     makeCompilersSet,
-    warnClangdIncompatibilitiesIfAny,
     YacceException,
 )
 
@@ -48,17 +47,20 @@ def _getArgs(
     parser = argparse.ArgumentParser(
         prog="yacce from_log",
         description=kMainDescription
-        + "\n\nMode 'from_log' tries to generate compile_commands.json from a strace log file.\n"
-        "WARNING: this mode is intended for debugging purposes only and most likely will not "
-        "produce a correct compile_commands.json due to a lack of information about the build system.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        + "\n\nMode 'from_log' is a supplementary mode that generates a compile_commands.json from "
+        "a strace log file without using any additional information about build system.\n"
+        "ATTENTION: this mode is intended for debugging purposes only and most likely will not "
+        "produce a correct compile_commands.json due to a lack of information about the build process details.\n"
+        "If you want to regenerate compile_commands from a log file for bazel, use 'yacce bazel --from_log' instead.",
+        formatter_class=BetterHelpFormatter,
+        #argparse.RawTextHelpFormatter, #RawDescriptionHelpFormatter,
     )
     parser.add_argument("log_file", help="Path to the strace log file to parse.", type=str)
     parser = addCommonCliArgs(
         parser,
         {
-            "cwd": " Relative path specification is always resolved to "
-            "the absolute path using directory of the log file. "
+            "cwd": "In the 'from_log' mode a relative path specification is resolved to "
+            "the absolute path using a directory of the log file.\n"
             "Default: directory of the log file.",
             "dest_dir":" Default: current working directory."
         },

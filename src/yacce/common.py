@@ -7,6 +7,7 @@ import os
 import re
 import rich.console
 import rich.progress
+import textwrap
 
 
 class YacceException(RuntimeError):
@@ -101,27 +102,60 @@ class LoggingConsole(rich.console.Console):
 
 
 kMainDescription = (
-    "yacce is a compile_commands.json generator for Bazel (and other build systems if/when implemented).\n"
-    "Homepage: https://github.com/Arech/yacce"
+    "Yacce extracts compile_commands.json and other build insights from spying on a build system "
+    "compiling a project locally.\n"
+    "Primarily supports Bazel (other build systems might be added later).\n"
+    "--> Homepage: https://github.com/Arech/yacce"
 )
+
+
+# WARNING: argparse doesn't guarantee its private API stability. WTH?!
+class BetterHelpFormatter(argparse.HelpFormatter):
+    kMaxWidth = 100
+
+    @staticmethod
+    def _useWidth(width):
+        return width if width < BetterHelpFormatter.kMaxWidth else BetterHelpFormatter.kMaxWidth
+
+    def _fill_text(self, text, width, indent):
+        width = self._useWidth(width)
+        return "\n".join(
+            indent + ("" if s == "%" else s)
+            for line in text.splitlines()
+            for s in argparse.HelpFormatter._split_lines(self, line if line else "%", width)
+        )
+
+    def _split_lines(self, text, width):
+        width = self._useWidth(width)
+        return [
+            "" if s == "%" else s
+            for line in text.splitlines()
+            for s in argparse.HelpFormatter._split_lines(self, line if line else "%", width)
+        ]
+
+
+kEmptyDisables = 'Pass an empty string "" to disable.'
+kAcceptSequence = "Accepts multiple values at once."
 
 
 def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     """ "Adds arguments common for multiple modes to the given parser."""
     parser.add_argument(
         "--cwd",
-        help="Path of working directory of the compilation. "
-        "This value goes to 'directory' field of an "
+        help="Path to the working directory of the compilation.\n"
+        "This value goes to a 'directory' field of an "
         "entry of compile_commands.json and is used to resolve relative paths found in the command. "
-        "yacce will try to test if mentioned files exist in this directory and warn if they aren't, "
-        "but passing files existence test alone doesn't guarantee that the resulting compile_commands.json will be correct."
+        "If '--ignore-not-found' argument isn't set, yacce will try to test if mentioned files exist in this "
+        "directory and warn if they aren't. Note that passing the file existence test helps, but doesn't "
+        "guarantee that the resulting compile_commands.json will be correct.\n"
         + addendums.get("cwd", ""),
+        metavar="path/to/dir",
         # no default as it depends on the mode
     )
 
     parser.add_argument(
         "--ignore-not-found",
-        help="If set, will not test if files to be added to .json exists. Default: %(default)s.",
+        help="If set, will not test if files to be added to .json exists.\n",
         action=argparse.BooleanOptionalAction,
         default=False,
     )
@@ -129,41 +163,48 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     parser.add_argument(
         "-o",
         "--other_commands",
-        help="If set, will also generate other_commands.json. This has similar format to "
-        "compile_commands.json, but contain all other found compiler invocations (such as for compiling "
-        "assembler sources, or for linking), that aren't useful for gathering C++ symbol information "
-        "of the project, but handy to get insights about the build in general. Default: %(default)s",
+        help="If set, yacce will also generate other_commands.json file.\n"
+        "This file has a similar to compile_commands.json format, but contains all other compiler "
+        "invocations found that aren't useful for gathering C++ symbol information of the project, "
+        "but handy to get insights about the build in general (such as for compiling assembler "
+        "sources or for linking).\n" + addendums.get("other_commands", ""),
         action=argparse.BooleanOptionalAction,
         default=False,
     )
 
+    kWarnCustomField = (
+        "WARNING: current clangd gets upset when it finds a field it doesn't know, "
+        "so enabling this option might prevent you from using clangd with the resulting file!\n"
+    )
+
     parser.add_argument(
         "--save_duration",
-        help="If set, will add 'duration_s' field into a resulting .json that contain how long the command run in "
-        "seconds with microsecond resolution. This currently doesn't have automated use, but can be inspected manually, or with a custom "
-        "script to obtain build system performance insights. Default: %(default)s. Note that currently clangd gets upset "
-        "when it encounters fields it doesn't know, so enabling this might prevent you from using clangd with the resulting file",
+        help="If set, yacce will add a 'duration_s' field into the resulting .json that contain how "
+        "long the command run in seconds with a microsecond resolution.\n"
+        "This feature currently doesn't have automated use, but the file can be inspected manually, "
+        "or with a custom script to obtain build system performance insights.\n" + kWarnCustomField,
         action=argparse.BooleanOptionalAction,
         default=False,
     )
 
     parser.add_argument(
         "--save_line_num",
-        help="If set, will add 'line_num' integer field into a resulting .json that contain a line "
-        "number that reference the compiler call in the source file. Useful for debugging. "
-        "Default: %(default)s. Note that currently clangd gets upset "
-        "when it encounters fields it doesn't know, so enabling this might prevent you from using clangd with the resulting file",
+        help="If set, yacce will add a 'line_num' integer field into the resulting .json that "
+        "contain a line number of the compiler call in the strace log file.\n"
+        "Useful for debugging, but have no automated use.\n" + kWarnCustomField,
         action=argparse.BooleanOptionalAction,
         default=False,
     )
 
     parser.add_argument(
         "--discard_outputs_with_pfx",
-        help="A build system can compile certain dummy source files only to gather information about "
-        "compiler capabilities. Typically, such files are placed into /tmp or /dev/null, but other variants are possible. "
-        "This setting allows to fully customize detection of which prefixes in compiler's output file "
-        "specification would lead to ignoring the compilation attempt. Default: %(default)s. "
-        'Pass an empty string "" to disable.',
+        help="A build system can compile some dummy source files only to gather information about "
+        "compiler capabilities. Presence of these files in the compile_commands.json aren't usually helpful. "
+        "Typically, such files are placed into /tmp or /dev/null, but other variants are possible.\n"
+        "This setting allows to fully customize which prefixes of a compiler's output file should "
+        "lead to ignoring the compilation call.\n" + kEmptyDisables + " " + kAcceptSequence + "\n"
+        "Default: %(default)s. ",
+        metavar="path/prefix",
         nargs="*",
         default=["/dev/null", "/tmp/"],
     )
@@ -171,47 +212,67 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     parser.add_argument(
         "--discard_sources_with_pfx",
         help="Similar to --discard_outputs_with_pfx, but controls which prefixes of source files "
-        "passed to a compiler, should lead to ignoring the compiler call. Default: %(default)s. "
-        'Pass an empty string "" to disable.',
+        "should lead to ignoring the compiler call.\n"
+        + kEmptyDisables
+        + " "
+        + kAcceptSequence
+        + "\nDefault: %(default)s.",
+        metavar="path/prefix",
         nargs="*",
         default=[""],
+    )
+
+    kDashToPlus = (
+        "ATTENTION: since Python's argparse always treats a leading dash in a CLI argument as a "
+        "script's argument name, but not value, use a plus sign '+' instead of a dash '-' to specify "
+        "a leading dash."
     )
 
     parser.add_argument(
         "--discard_args_with_pfx",
         help="Certain compiler arguments, such as sanitizers, are known to choke clangd. Some others "
-        "concerning build reproducibility are just useless for C++ symbols. Set a value "
-        "of this parameter to a sequence of prefixes to match and remove such compiler arguments "
-        'from the list. Default: %(default)s. Pass an empty string "" to disable.',
+        "like those concerning build reproducibility might be useless for C++ symbols.\n"
+        "Set a value of this parameter to a sequence of prefixes to match and remove such compiler "
+        "arguments.\n"
+        + kEmptyDisables
+        + " "
+        + kAcceptSequence
+        + "\n"
+        + kDashToPlus
+        + " Example: instead of '-fsanitize' use '+fsanitize'.\nDefault: %(default)s.",
+        metavar="+compiler_arg_prefix",
         nargs="*",
         default=[
-            "-fsanitize"
+            "+fsanitize"
         ],  # , "-frandom-seed=", "-D__DATE__=", "-D__TIMESTAMP__=", "-D__TIME__="],
     )
 
     parser.add_argument(
         "--discard_args",
-        help="Similarly to --discard_args_with_pfx, values for this argument define a set of "
-        "compiler arguments (such as '-DMY_DEF=VALUE') or pipe-delimited argument pairs (such as a "
+        help="Similarly to '--discard_args_with_pfx', values for this argument define a set of "
+        "compiler arguments (such as '-DMY_DEF=VALUE') or pipe-delimited argument pairs (like a "
         "single token value '-I|/certain/dir' defines a two token pair '-I /certain/dir') "
-        "that will be removed from a compiler invocation. Note that a single token specification "
-        "for -D compiler argument has a special handling and also addresses its two token alternatives. "
-        "NOTE: since Python's argparse always treats a leading dash in CLI argument as an argument "
-        "name, but not value, use a plus sign '+' instead of a dash '-' to specify leading dashes "
-        "(so examples above become '+DMY_DEF=VALUE' and '+I|/certain/dir')"
-        "Default: %(default)s. "
-        'Pass an empty string "" to disable.',
+        "that will be removed from a compiler invocation.\n"
+        "Note that a single token specification of a '-D' compiler argument has a special handling "
+        "and also addresses its two token alternatives.\n"
+        + kEmptyDisables
+        + " "
+        + kAcceptSequence
+        + "\n"
+        + kDashToPlus
+        + " For the above it's '+DMY_DEF=VALUE' and '+I|/certain/dir'.\nDefault: %(default)s.",
+        metavar="+compiler_arg_or_args_pair_spec",
         nargs="*",
         default=["+DADDRESS_SANITIZER"],
     )
 
     parser.add_argument(
         "--enable_dupes_check",
-        help="If set, will provide a report if a pair <source, output> isn't unique. "
+        help="If set, yacce will report if a pair <source, output> isn't unique.\n"
         "Usefulness of this flag solely depends on actual build system implementation. Some might "
         "use lots of temporary compilations just to gather compiler capabilities which could lead "
         "to an avalanche of false positives. This could be mitigated with --discard* family of flags, "
-        "but this requires manual intervention. Default: %(default)s",
+        "but this requires manual intervention, hence it's disabled by default.\n",
         action=argparse.BooleanOptionalAction,
         default=False,
     )
@@ -219,16 +280,18 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     parser.add_argument(
         "-c",
         "--compiler",
-        help="Abs path or basename of a custom compiler used by the build system. Many such arguments can be passed.",
-        type=str,
+        help="Adds a set of absolute paths and basenames of custom compilers used by the build "
+        "system to the set of compilers already detectable by yacce. " + kAcceptSequence,
+        metavar="compiler_basename_or_path",
         nargs="*",
     )
 
     parser.add_argument(
         "-d",
         "--dest_dir",
-        help="Destination directory into which to create resulting .json files. Must exist."
+        help="Destination directory in which yacce should create resulting .json files. Must exist.\n"
         + addendums.get("dest_dir", ""),
+        metavar="dir/path",
         # no default as it depends on the mode
     )
 
@@ -475,6 +538,14 @@ class BaseParser:
     # ending of execve() line
     _r_execve_end = re.compile(r"\)\s*=\s*0\s*$")
 
+    @staticmethod
+    def _leadingPlusToDash(s: str) -> str:
+        if s.startswith("++"):
+            return "--" + s[2:]
+        elif s.startswith("+"):
+            return "-" + s[1:]
+        return s
+
     def __init__(self, Con: LoggingConsole, args: argparse.Namespace) -> None:
         self.Con = Con
         self._compilers = args.compiler
@@ -487,7 +558,9 @@ class BaseParser:
         self._discard_sources_with_pfx = tuple(
             s for s in args.discard_sources_with_pfx if len(s) > 0
         )
-        self._discard_args_with_pfx = tuple(s for s in args.discard_args_with_pfx if len(s) > 0)
+        self._discard_args_with_pfx = tuple(
+            BaseParser._leadingPlusToDash(s) for s in args.discard_args_with_pfx if len(s) > 0
+        )
         self._discard_args = self._makeDiscardArgs(Con, args.discard_args)
         self._do_dupes_check = args.enable_dupes_check
 
@@ -531,10 +604,7 @@ class BaseParser:
             ret[n] = v
 
         for da in discard_args:
-            if da.startswith("++"):
-                da = "--" + da[2:]
-            elif da.startswith("+"):
-                da = "-" + da[1:]
+            da = BaseParser._leadingPlusToDash(da)
 
             splt = da.split("|", maxsplit=1)
             if len(splt) == 1:

@@ -6,20 +6,22 @@ from yacce.mod_bazel import mode_bazel
 from yacce.mod_from_log import mode_from_log
 
 
+def _getModeHelpString(mode: str) -> str:
+    return f"Hint: use 'yacce {mode} --help' to get CLI arguments help."
+
+
 # default mode is the first
 kModes = {
-    "bazel": "Runs given build system based on Bazel and extract compile_commands.json from it (possibly "
-    "with individual auxiliary compile_commands.json for each dependency). This is a default mode "
-    "activated if the mode specification is just omitted.",
-
-    "from_log": "[dbg] Generate a possibly NON-WORKING(!) compile_commands.json from a strace log file. "
+    "bazel": "Runs a given build system based on Bazel in a shell and extracts compile_commands.json "
+    "from it (possibly with individual compile_commands.json for each external dependency).\nThis is "
+    "a default mode activated if the mode specification is just omitted.\n"
+    + _getModeHelpString("bazel"),
+    "from_log": "[dbg!] Generates a possibly NON-WORKING(!) compile_commands.json from a strace log file.\n"
     "This mode features the most generic way to parse strace output and since the log generally "
-    "lacks some important information (such as the working directory in case of Bazel, "
-    "which substitutes PWD with a useless /proc/self/cwd), it may produce a non-working "
-    "compile_commands.json. This mode is primarily intended for debugging purposes as it doesn't "
-    "use any assumptions about the build system and just parses the strace log file and turns it "
-    "into compile_commands.json as is. Note that you might want to disable checking files existence "
-    "with --ignore-not-found",
+    "lacks some important information (such as the working directory in case of a Bazel), it may "
+    "produce a non-working compile_commands.json. The mode is primarily intended for debugging "
+    "purposes as it doesn't use any knowledge about the build system used and just parses the strace "
+    "log file and turns it into compile_commands.json as is.\n" + _getModeHelpString("from_log"),
 }
 
 kModeFuncs = {"bazel": mode_bazel, "from_log": mode_from_log}
@@ -40,14 +42,16 @@ def getModeArgs():
     parser = argparse.ArgumentParser(
         prog="yacce",
         description=common.kMainDescription,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=common.BetterHelpFormatter,
+        #argparse.RawTextHelpFormatter, #RawDescriptionHelpFormatter,
     )
 
     # dumb, but argparse doesn't have a way to query for defined flags
     definedFlags = {"--debug"}
     parser.add_argument(
         "--debug",
-        help="Minimum debug level to show. 0 is the most verbose. Default: %(default)s",
+        help="Minimum debug level to show. 0 is the most verbose.\n"
+        f"Default level is (info=) %(default)s. Setting it higher than a (warning=) {common.LoggingConsole.LogLevel.Warning.value} is not recommended.",
         type=int,
         choices=range(0, common.LoggingConsole.LogLevel.Critical.value + 1),
         default=common.LoggingConsole.LogLevel.Info.value,
@@ -56,13 +60,13 @@ def getModeArgs():
     definedFlags |= {"--colors", "--no-colors"}
     parser.add_argument(
         "--colors",
-        help="Controls if the output could be colored. Default: %(default)s",
+        help="Controls if the output could be colored.",
         action=argparse.BooleanOptionalAction,
         default=True,
     )
 
     modes = parser.add_subparsers(
-        help='Modes of operation. Use "--help" with each to get more info.'
+        help='Modes of operation. Use "--help" with each mode to get more information.'
     )
 
     for mode, description in kModes.items():
@@ -103,14 +107,13 @@ def main():
     try:
         ret = kModeFuncs[mode](Con, args, unparsed_args)
         common.warnClangdIncompatibilitiesIfAny(Con, args)
-        
+
         Con.debug(f"Exiting with code {ret}")
         sys.exit(ret)
     except common.YacceException as e:
         Con.critical(repr(e))
         Con.debug("Exiting with code 1")
         sys.exit(1)
-
 
 
 if __name__ == "__main__":
