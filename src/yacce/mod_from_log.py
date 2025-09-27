@@ -51,7 +51,7 @@ def _getArgs(
         "a strace log file without using any additional information about build system.\n"
         "ATTENTION: this mode is intended for debugging purposes only and most likely will not "
         "produce a correct compile_commands.json due to a lack of information about the build process details.\n"
-        "If you want to regenerate compile_commands from a log file for bazel, use 'yacce bazel --from_log' instead.",
+        "If you want to regenerate compile_commands from a log file for Bazel, use 'yacce bazel --from_log' instead.",
         formatter_class=BetterHelpFormatter,
         #argparse.RawTextHelpFormatter, #RawDescriptionHelpFormatter,
     )

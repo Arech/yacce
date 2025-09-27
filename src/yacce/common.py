@@ -102,8 +102,8 @@ class LoggingConsole(rich.console.Console):
 
 
 kMainDescription = (
-    "Yacce extracts compile_commands.json and other build insights from spying on a build system "
-    "compiling a project locally.\n"
+    "Yacce extracts compile_commands.json and build system insights from a build system "
+    "by supervising the local compilation process with strace.\n"
     "Primarily supports Bazel (other build systems might be added later).\n"
     "--> Homepage: https://github.com/Arech/yacce"
 )
@@ -134,12 +134,15 @@ class BetterHelpFormatter(argparse.HelpFormatter):
         ]
 
 
-kEmptyDisables = 'Pass an empty string "" to disable.'
-kAcceptSequence = "Accepts multiple values at once."
-
-
 def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     """ "Adds arguments common for multiple modes to the given parser."""
+    kWarnCustomField = (
+        "WARNING: current clangd gets upset when it finds a field it doesn't know, "
+        "so enabling this option might prevent you from using clangd with the resulting file!\n"
+    )
+    kEmptyDisables = 'Pass an empty string "" to disable.'
+    kAcceptSequence = "Accepts multiple values at once."
+
     parser.add_argument(
         "--cwd",
         help="Path to the working directory of the compilation.\n"
@@ -170,11 +173,6 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         "sources or for linking).\n" + addendums.get("other_commands", ""),
         action=argparse.BooleanOptionalAction,
         default=False,
-    )
-
-    kWarnCustomField = (
-        "WARNING: current clangd gets upset when it finds a field it doesn't know, "
-        "so enabling this option might prevent you from using clangd with the resulting file!\n"
     )
 
     parser.add_argument(

@@ -35,12 +35,12 @@ def _getArgs(
         prog="yacce bazel",
         description=kMainDescription
         + "\n\nMode 'bazel' is intended to generate compile_commands.json from tracing execution of "
-        "a 'bazel build' or any other shell command invoking 'bazel' using the Linux's strace utility. Hence it "
-        "only supports compilation of a single bazel workspace (including its all external dependencies) "
-        "happening locally. If you are using bazel's remote "
+        "a 'bazel build' or any other shell command invoking Bazel using the Linux's strace utility. Hence it "
+        "only supports compilation of a single Bazel workspace (including its all external dependencies) "
+        "happening locally. If you are using Bazel's remote "
         "caching feature, including '--disk_cache', please make sure you're starting with a clean "
         "cache, otherwise yacce won't see compilation of cache hits.",
-        usage="yacce [global options] [bazel] [options (see below)] [-- shell command eventually invoking bazel]",
+        usage="yacce [global options] [bazel] [options (see below)] [-- shell command eventually invoking Bazel]",
         formatter_class=BetterHelpFormatter,
         # argparse.RawTextHelpFormatter, #RawDescriptionHelpFormatter,
     )
@@ -68,7 +68,7 @@ def _getArgs(
     )
 
     p_live = parser.add_argument_group(
-        "Live mode (default), runs a bazel build system and is mutually exclusive with the log mode"
+        "Live mode (default), runs a Bazel build system and is mutually exclusive with the log mode"
     )
     excl2 = {"keep_log"}
     p_live.add_argument(
@@ -102,7 +102,7 @@ def _getArgs(
         "- The default option 'combine-with-overridden' produces a single compile_commands.json containing "
         "main project's files as well as dependencies that are stored *outside* of their "
         "expected location at '$(bazel info output_base)/external/<repo>' (this typically happens when you "
-        "override a dependency repo location for bazel when you work on the project and its dependency simultaneously).\n"
+        "override a dependency repo location for Bazel when you work on the project and its dependency simultaneously).\n"
         "- Option 'to-files' produces individual files nearby the main compile_commands.json, named like"
         "'compile_commands_ext_<repo>.json' for each external dependency '<repo>' (this might be useful "
         "for manual inspection).\n"
@@ -122,7 +122,7 @@ def _getArgs(
     parser.add_argument(
         "--bazel_command",
         default="bazel",
-        help="Override which command to run to communicate with the instance of bazel for the build system.\n"
+        help="Override which command to run to communicate with the instance of a Bazel for the build system.\n"
         "You don't typically need this argument, if you have bazelisk installed.\n"
         "To set the workspace directory see '--bazel_workspace' argument.\n"
         "Default: %(default)s",
@@ -131,7 +131,7 @@ def _getArgs(
 
     parser.add_argument(
         "--bazel_workspace",
-        help="Overrides bazel workspace directory to set a current directory context for the bazel command (see "
+        help="Overrides Bazel workspace directory to set a current directory context for the bazel command (see "
         "'--bazel_command').\n" \
         "This is useful if yacce needs to be run from an outside of that "
         "workspace. Note that any dir under a real workspace would also work here.\n"
@@ -142,7 +142,7 @@ def _getArgs(
 
     parser.add_argument(
         "--build_cwd",
-        help="By default, a shell command to start the build is invoked from the bazel workspace "
+        help="By default, a shell command to start the build is invoked from the Bazel workspace "
         "directory (see '--bazel_workspace'). This argument allows to override that and set a "
         "different directory as a cwd for the build command.\n" \
         "Note that this is different from '--cwd' argument, which "
@@ -177,7 +177,7 @@ def _getArgs(
             "specified) this argument is either has to be unset, or match the output of '$(bazel info execution_root)'.",
             "dest_dir": " Default: directory of the log file (see '--log_file')",
             "other_commands": " Note that yacce currently does not implement attribution of other "
-            "compilation commands to bazel external dependencies. I.e. all other commands related to "
+            "compilation commands to the project's external dependencies. I.e. all other commands related to "
             "compiling non-C++ sources and linking will be combined into a single other_commands.json "
             "file irrespective of '--external' argument setting.",
         },
@@ -230,7 +230,7 @@ class BazelParser(BaseParser):
         setattr(args, "ignore_not_found", do_test_files)
         self._test_files = do_test_files
 
-        Con.trace("Starting bazel specific processing...")
+        Con.trace("Starting Bazel-specific processing...")
         self._update()
 
     def _makeFullPath(
@@ -314,7 +314,7 @@ class BazelParser(BaseParser):
 
         with Progress(console=self.Con) as progress:  # transient=True,
             task = progress.add_task(
-                "Applying bazel specific transformations to the log...",
+                "Applying Bazel-specific transformations to the log...",
                 total=len(self.compile_commands),
             )
             for ccidx, cc in enumerate(self.compile_commands):
@@ -516,7 +516,7 @@ class BazelParser(BaseParser):
 
 
 class BazelWrap:
-    """Takes care of communicating with bazel, including running a build command under strace and
+    """Takes care of communicating with Bazel, including running a build command under strace and
     producing the log file.
 
     More precisely:
@@ -544,7 +544,7 @@ class BazelWrap:
         if not os.path.isdir(args.bazel_workspace):
             raise YacceException(
                 f"Bazel workspace directory '{args.bazel_workspace}' doesn't exist.\n"
-                "Consider checking value of --bazel_workspace argument."
+                "Consider checking the value of '--bazel_workspace' argument."
             )
         self._bazel_workspace: str = args.bazel_workspace
 
@@ -587,10 +587,10 @@ class BazelWrap:
                 # this assumes that build system was run and hence execution_root exists
                 if not self._execution_root or not os.path.isdir(self._execution_root):
                     raise YacceException(
-                        f"Invalid or non-existing execution_root directory '{self._execution_root}' returned by bazel"
+                        f"Invalid or non-existing execution_root directory '{self._execution_root}' returned by Bazel"
                     )
             except Exception as e:
-                raise YacceException(f"Failed to query bazel execution root: {e}")
+                raise YacceException(f"Failed to query Bazel execution root: {e}")
 
         return self._execution_root
 
@@ -608,12 +608,12 @@ class BazelWrap:
                 exec_root = self._getExecutionRoot()
                 if args.cwd != exec_root:
                     self.Con.warning(
-                        f"Specified cwd '{args.cwd}' doesn't match to bazel execution root '{exec_root}'. "
-                        "Will ignore --cwd specification and use what bazel provided."
+                        f"Specified cwd '{args.cwd}' doesn't match to Bazel execution root '{exec_root}'. "
+                        "Will ignore '--cwd' specification and use what Bazel provided."
                     )
                     args.cwd = exec_root
         else:
-            self.Con.debug("Querying bazel for execution root...")
+            self.Con.debug("Querying Bazel for the execution root...")
             args.cwd = self._getExecutionRoot()
         self._execution_root = args.cwd
 
@@ -640,9 +640,9 @@ class BazelWrap:
                 self._bazel = self._resolveBinaryPath(self._bazel)
             except YacceException as e:
                 raise YacceException(
-                    f"{e}\nIf your basel workspace differs from current directory and you have "
-                    "set --bazel_workspace parameter to point to it properly, either you have to "
-                    "invoke a custom bazel binary (i.e. set --bazel_command argument) or "
+                    f"{e}\nIf your Bazel workspace differs from current directory and you have "
+                    "set '--bazel_workspace' parameter to point to it properly, either you have to "
+                    "invoke a custom Bazel binary (i.e. set '--bazel_command' argument) or "
                     "better just install bazelisk."
                 )
             self.Con.info("Checking if '", self._bazel, "' works in:", self._bazel_workspace)
@@ -654,7 +654,7 @@ class BazelWrap:
                 self._bazel_tested = True
             except Exception as e:
                 raise YacceException(
-                    f"Failed to run bazel ('{self._bazel}') in directory: '{self._bazel_workspace}': {e}"
+                    f"Failed to run Bazel ('{self._bazel}') in directory: '{self._bazel_workspace}': {e}"
                 )
 
     def runBuild(self, args: argparse.Namespace, build_system_args: list) -> None:
@@ -720,7 +720,7 @@ class BazelWrap:
         if args.clean in ("always", "expunge"):
             self._bazelClean(args.clean == "expunge")
         else:
-            self.Con.debug("Skipping bazel clean as requested.")
+            self.Con.debug("Skipping 'bazel clean' as requested.")
 
     def _checkStrace(self) -> None:
         assert self._bazel_workspace
@@ -762,19 +762,19 @@ class BazelWrap:
             raise YacceException(f"Failed to '{self._bazel} {' '.join(args)}': {e}")
 
     def _getBazelServerPid(self) -> int:
-        self.Con.debug("Querying bazel server PID...")
+        self.Con.debug("Querying Bazel's server PID...")
         try:
             pid_str = None
             pid_str = self._queryBazelThrow("info", "server_pid")
             pid = int(pid_str)
             if pid <= 0:
-                raise YacceException(f"Invalid bazel server PID '{pid}' returned by bazel")
+                raise YacceException(f"Invalid Bazel server PID '{pid}' returned")
             self.Con.debug(f"Bazel server PID is {pid}")
             return pid
         except ValueError:
-            raise YacceException(f"Non-integer bazel server PID '{pid_str}' was returned by bazel")
+            raise YacceException(f"Non-integer Bazel server PID '{pid_str}' was returned")
         except Exception as e:
-            raise YacceException(f"Failed to query bazel server PID: {e}")
+            raise YacceException(f"Failed to query Bazel server PID: {e}")
 
     def _launchStrace(self, server_pid: int, log_file: str) -> subprocess.Popen:
         try:
