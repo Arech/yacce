@@ -357,7 +357,7 @@ class BazelParser(BaseParser):
                     ):
                         next_is_path = True
                     elif m_pfx_arg := self.r_pfx_arg_is_path.match(arg):
-                        path_part = arg[m_pfx_arg.end() :]
+                        path_part = arg[m_pfx_arg.end() :].lstrip()
                         if path_part:
                             args[argidx] = m_pfx_arg.group() + _fix_path(path_part, argidx, None)
                     # new_args.append(arg)

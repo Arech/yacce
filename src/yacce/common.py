@@ -903,7 +903,7 @@ class BaseParser:
                 if arg in self.kOutputArgs:
                     next_is_output = True
             elif m_pfx_arg := self.r_pfx_arg_is_path.match(arg):
-                path_part = arg[m_pfx_arg.end() :]
+                path_part = arg[m_pfx_arg.end() :].lstrip()
                 if path_part:
                     self._testPathExists(path_part, line_num, pid, args_str)
                     if "--output=" == m_pfx_arg.group(1):

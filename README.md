@@ -88,7 +88,7 @@ First, install yacce with `pip install yacce`. Python 3.10+ is supported.
 
 Second, ensure you have [strace](https://man7.org/linux/man-pages/man1/strace.1.html) installed with `sudo apt install strace`. Some distributions have it installed by default.
 
-### 1. Compiling JAX (`jaxlib` wheel)
+### 1. Extracting compile_commands.json for JAX (`jaxlib` wheel)
 
 JAX is one of Google's machine learning frameworks. It has interface code written in Python, while
 most high performance code is in C++ seen with Python bindings. A compiled part is called `jaxlib`
@@ -119,13 +119,6 @@ Without yacce, we'd use the following command inside `./jax` directory:
 python3 ./build/build.py build --wheels=jaxlib --verbose --use_clang false \
   --target_cpu_features=native --bazel_options=--override_repository=xla=../xla
 ```
-This is a helper script that knows how to properly invoke bazel to build JAX. A couple of arguments needs comments:
-- `--use_clang false` tells the script to use gcc instead of clang. While clang is the recommended
-compiler, I'm feeling a bit lazy to install the recommended latest version, so I opt-in for `gcc`.
-If you have the latest clang installed - remove that option.
-- `--bazel_options=--override_repository=xla=../xla`: `--bazel_options` script's argument will pass its value directly
-to Bazel. Here Bazel will get `--override_repository=xla=../xla` option which requires it to use `../xla` directory
-for a `xla` dependency instead of a hardcoded commit fetched from the Internet.
 
 With yacce, we just prepend the command with `yacce -- ` like this
 
@@ -136,20 +129,18 @@ yacce -- python3 ./build/build.py build --wheels=jaxlib --verbose --use_clang fa
 ```
 
 At the start, yacce will test if strace and bazel are available, and then it will ask your permission to
-execute `bazel clean` command. While yacce just will not be able to gather all necessary information
-and produce a proper `compile_commands.json` if bazel's execution root directory is not clean when
-build started, cleaning it and rebuilding from scratch might be expensive on some code bases. Yacce
-tries not to bring harm accidentally, but if you want it authorize to do that from the beginning,
-you can instead invoke yacce with a `--clean` argument like this: `yacce --clean always -- `.
+execute `bazel clean` command. Starting with a clean state is mandatory for yacce to capture all
+compilation commands, but since cleaning and rebuilding from scratch might be expensive, yacce tries
+to prevent accidental harm by asking a permission. You can authorize it to do that from command line
+if you invoke yacce with a `--clean always` argument like this: `yacce --clean always -- `.
 
 After doing `bazel clean`, yacce will setup `strace` supervision over Bazel's server execution, and
 then will launch the build script. When the build finishes, yacce will start strace log processing
-and in a few seconds it'll write `/src_jax/jax/compile_command.json` containing all C++ source files
+and in few seconds it'll write `/src_jax/jax/compile_command.json` containing all C++ source files
 used for `jaxlib` and for parts of XLA, that were required by jaxlib.
 
 Now fire up your IDE and point `clangd` to that file, so it starts indexing it. In VSCode with `clangd`
 extension installed, if `/src_jax` is the main opened directory (workspace), then one could open
 Settings / Extensions / clangd, and click "Add Item" for `clangd.arguments` settings, putting
 `--compile-commands-dir=${workspaceFolder}/jax` there and then do ctrl+shift+p, "clangd.restart".
-
 
