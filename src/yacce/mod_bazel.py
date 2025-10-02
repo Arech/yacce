@@ -21,7 +21,6 @@ from .common import (
     # OtherCommand,
     kMainDescription,
     LoggingConsole,
-    makeCompilersSet,
     storeJson,
     unescapePath,
     YacceException,
@@ -216,15 +215,17 @@ def _getArgs(
     # if args.clean is None:
     #    setattr(args, "clean", "always")
 
-    setattr(args, "compiler", makeCompilersSet(args.compiler))
     return args, unparsed_args
 
 
 class BazelParser(BaseParser):
     def __init__(self, Con: LoggingConsole, args: argparse.Namespace) -> None:
         Con.trace("Running base parser")
+
+        # disabling the checks, as we do it on our own.
         do_test_files = not args.ignore_not_found
         setattr(args, "ignore_not_found", True)
+
         super().__init__(Con, args)
 
         setattr(args, "ignore_not_found", do_test_files)

@@ -8,7 +8,6 @@ from .common import (
     BetterHelpFormatter,
     kMainDescription,
     LoggingConsole,
-    makeCompilersSet,
     YacceException,
 )
 
@@ -74,16 +73,13 @@ def _getArgs(
         args.dest_dir = os.getcwd()
 
     args = _fixCwdArg(Con, args)
-    setattr(args, "compiler", makeCompilersSet(args.compiler))
     return args
 
 
 def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: list) -> int:
     args = _getArgs(Con, args, unparsed_args)
 
-    p = BaseParser(
-        Con, args.log_file, args.cwd, not args.ignore_not_found, args.compiler, args.other_commands
-    )
+    p = BaseParser(Con, args)
 
     p.storeJsons(args.dest_dir, args.save_duration, args.save_line_num)    
     return 0

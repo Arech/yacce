@@ -278,10 +278,29 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
     parser.add_argument(
         "-c",
         "--compiler",
-        help="Adds a set of absolute paths and basenames of custom compilers used by the build "
-        "system to the set of compilers already detectable by yacce. " + kAcceptSequence,
-        metavar="compiler_basename_or_path",
+        help="Adds an absolute path, a basename, a path suffix, or a path prefix (prepend it with a "
+        "plus '+' symbol) of a custom compiler to the set of compilers already detectable by yacce. "
+        + kAcceptSequence,
+        metavar="compiler_basename_or_path_fragment",
         nargs="*",
+    )
+
+    parser.add_argument(  # TODO IMPLEMENT
+        "--not_compiler",
+        help="You can prevent a certain absolute path, a basename, a path suffix, or a path prefix "
+        "(prepend it with a plus '+' symbol) from being treated as a compiler by using "
+        "this argument. " + kAcceptSequence,
+        metavar="compiler_basename_or_path_fragment",
+        nargs="*",
+    )
+
+    parser.add_argument(  # TODO IMPLEMENT
+        "--enable_compiler_scripts",
+        help="By default, yacce doesn't treat a script (classified by a shebang #! in the first 2 "
+        "bytes of the file) invocation as a compiler invocation and ignores it. Set this option "
+        "when this behavior is unwanted.\n",
+        action=argparse.BooleanOptionalAction,
+        default=False,
     )
 
     parser.add_argument(
@@ -310,16 +329,45 @@ def warnClangdIncompatibilitiesIfAny(Con: LoggingConsole, args: argparse.Namespa
         _warnField("save_line_num", "line_num")
 
 
-CompilersTuple = namedtuple("CompilersTuple", ["basenames", "fullpaths"])
+CompilersTuple = namedtuple("CompilersTuple", ["basenames", "prefixes", "suffixes", "fullpaths"])
 
 
-def makeCompilersSet(custom_compilers: list[str] | None) -> CompilersTuple:
+def _splitCompilerListByType(custom_compilers: list[str] | None) -> CompilersTuple:
+    names = []
+    pfx = []
+    sfx = []
+    paths = []
+
+    if custom_compilers is not None:
+        assert isinstance(custom_compilers, list)
+        for cc in custom_compilers:
+            if not cc:
+                continue
+            assert isinstance(cc, str)
+
+            if os.path.isabs(cc):
+                paths.append(cc)
+            elif os.path.basename(cc) == cc:
+                names.append(cc)
+            elif cc.startswith("+"):
+                if len(cc) > 1:
+                    pfx.append(cc[1:])
+                # else ignore
+            else:
+                sfx.append(cc)
+
+    return CompilersTuple(
+        basenames=frozenset(names),
+        prefixes=tuple(pfx),
+        suffixes=tuple(sfx),
+        fullpaths=frozenset(paths),
+    )
+
+
+def _makeCompilersSet(custom_compilers: list[str] | None) -> CompilersTuple:
     """Adds custom compilers to the set of known compilers to find in strace log."""
 
-    if custom_compilers is None:
-        custom_compilers = []
-    assert isinstance(custom_compilers, list)
-    assert all(isinstance(c, str) for c in custom_compilers)
+    compilers = _splitCompilerListByType(custom_compilers)
 
     kGccVers = (9, 18)
     kGccPfxs = ("", "x86_64-linux-gnu-")
@@ -331,14 +379,17 @@ def makeCompilersSet(custom_compilers: list[str] | None) -> CompilersTuple:
         + [f"{pfx}g++-{v}" for v in range(*kGccVers) for pfx in kGccPfxs]
         + [f"clang-{v}" for v in range(*kClangVers)]
         + [f"clang++-{v}" for v in range(*kClangVers)]
-        + [c for c in custom_compilers if c and not c.startswith("/")]
+        + list(compilers.basenames)
     )
     # note there's not much point to try to prune the set of basenames or full paths, as a build system
     # could reference a compiler in a custom path, so we can't detect its presence on the machine.
 
-    paths = frozenset([c for c in custom_compilers if c and c.startswith("/")])
-
-    return CompilersTuple(basenames=basenames, fullpaths=paths)
+    return CompilersTuple(
+        basenames=basenames,
+        prefixes=compilers.prefixes,
+        suffixes=compilers.suffixes,
+        fullpaths=compilers.fullpaths,
+    )
 
 
 # line_num:int is the number (1 based index) of line in the log that spawned the process
@@ -546,7 +597,14 @@ class BaseParser:
 
     def __init__(self, Con: LoggingConsole, args: argparse.Namespace) -> None:
         self.Con = Con
-        self._compilers = args.compiler
+
+        setattr(args, "compiler", _makeCompilersSet(args.compiler))
+        self._compilers: CompilersTuple = args.compiler
+
+        self._enable_compiler_scripts: bool = args.enable_compiler_scripts
+        setattr(args, "not_compiler", _splitCompilerListByType(args.not_compiler))
+        self._not_compilers: CompilersTuple = args.not_compiler
+
         self._do_other = args.other_commands
         self._cwd = os.path.realpath(args.cwd)
         self._test_files = not args.ignore_not_found
@@ -631,6 +689,8 @@ class BaseParser:
         self._unsupported_args = set()  # set of found unsupported args
         self._num_dropped_args_by_pfx = 0  # for a report on how many args by pfx were dropped
         self._num_dropped_args_by_match = 0
+        self._compiler_is_script = set()
+        self._not_script = set()
 
         with rich.progress.open(
             log_file, "r", description="Parsing strace log file...", console=self.Con
@@ -736,6 +796,14 @@ class BaseParser:
                 "If you think these should be supported, consider making a PR or reporting an issue."
             )
 
+        if not self._enable_compiler_scripts and self._compiler_is_script:
+            self.Con.trace(
+                "In total",
+                len(self._compiler_is_script),
+                " compiler script instances were ignored:",
+                sorted(self._compiler_is_script),
+            )
+
         # cleanup
         del self._num_dropped_args_by_match
         del self._num_dropped_args_by_pfx
@@ -794,6 +862,55 @@ class BaseParser:
                 f"Full command args are: {args_str}"
             )
 
+    def _isCompilerScript(self, compiler_path: str) -> bool:
+        if compiler_path in self._compiler_is_script:
+            return True
+        if compiler_path in self._not_script:
+            return False
+
+        ret = False
+        try:
+            with open(compiler_path, mode="rb") as file:
+                first_bytes = file.read(2)
+                if first_bytes == b"#!":
+                    ftype = "a script and will be rejected."
+                    self._compiler_is_script.add(compiler_path)
+                    ret = True
+                else:
+                    ftype = "not a script and will be used."
+                    self._not_script.add(compiler_path)
+
+                self.Con.debug("Compiler file", compiler_path, " is classified as", ftype)
+
+        except Exception as e:
+            self.Con.warning(
+                "Failed to classify compiler_path =",
+                compiler_path,
+                "as a script, or not. Assuming not a script. Error:",
+                e,
+            )
+            self._not_script.add(compiler_path)
+        return ret
+
+    def _isCompiler(self, compiler_path: str, compiler_basename: str) -> bool:
+        if (
+            compiler_path not in self._compilers.fullpaths
+            and compiler_basename not in self._compilers.basenames
+            and not compiler_path.startswith(self._compilers.prefixes)
+            and not compiler_path.endswith(self._compilers.suffixes)
+        ):
+            return False  # not a compiler we care about
+
+        # checking if blacklisted
+        if (
+            compiler_path in self._not_compilers.fullpaths
+            or compiler_basename in self._not_compilers.basenames
+            or compiler_path.startswith(self._not_compilers.prefixes)
+            or compiler_path.endswith(self._not_compilers.suffixes)
+        ):
+            return False  # not a compiler we care about
+        return True
+
     def _handleExec(self, call: str, pid: int, ts: float, line_num: int, line: str) -> None:
         assert pid not in self._running_pids  # should be checked by the caller
         """assert call in ("execve", "execveat"), (
@@ -819,11 +936,23 @@ class BaseParser:
 
         # unescaping quotes and other symbols.
         compiler_path = unescapePath(match_filepath.group(2))
-        if (
-            compiler_path not in self._compilers.fullpaths
-            and os.path.basename(compiler_path) not in self._compilers.basenames
-        ):
-            return  # not a compiler we care about
+        compiler_basename = os.path.basename(compiler_path)
+        # first checking as it's seen in strace log
+        if not self._isCompiler(compiler_path, compiler_basename):
+            return
+        if not os.path.isabs(compiler_path):
+            # now how it's seen from the cwd
+            compiler_path = os.path.join(self._cwd, compiler_path)
+            if not self._isCompiler(compiler_path, compiler_basename):
+                return
+
+        orig_path = compiler_path
+        compiler_path = os.path.realpath(compiler_path)
+        if orig_path != compiler_path and not self._isCompiler(compiler_path, compiler_basename):
+            return
+
+        if not self._enable_compiler_scripts and self._isCompilerScript(compiler_path):
+            return
 
         # finding execv() args in the rest of the line
         args_start_pos = match_filepath.end() + 3
@@ -968,8 +1097,9 @@ class BaseParser:
                 )
                 return
 
-        # TODO: do we need to fix the first argument in args to be the same as the one used in
-        # execve()? It might be different depending how execve() was called.
+        # Fixing the first argument in args to be the same as the one used in the execve() call.
+        args[0] = compiler_path
+
         if is_other:
             if self._do_dupes_check:
                 self._checkSameOther(args_str, line_num, arg_output)
