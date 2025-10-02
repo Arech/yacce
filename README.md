@@ -174,257 +174,273 @@ and settings it supports.
 $ yacce -h
 usage: yacce [-h] [--debug {0,1,2,3,4,5,6}] [--colors | --no-colors] {bazel,from_log} ...
 
-Yacce extracts compile_commands.json and build system insights from a build system by supervising
-the local compilation process with strace.
+Yacce extracts compile_commands.json and build system insights from a build system by
+supervising the local compilation process with strace.
 Primarily supports Bazel (other build systems might be added later).
 --> Homepage: https://github.com/Arech/yacce
 
 positional arguments:
-{bazel,from_log}      Modes of operation. Use "--help" with each mode to get more information.
-bazel                 Runs a given build system based on Bazel in a shell and extracts
-                      compile_commands.json from it (possibly with individual
-                      compile_commands.json for each external dependency).
-                      This is a default mode activated if the mode specification is just
-                      omitted.
-                      Hint: use 'yacce bazel --help' to get CLI arguments help.
-from_log              [dbg!] Generates a possibly NON-WORKING(!) compile_commands.json from a
-                      strace log file.
-                      This mode features the most generic way to parse strace output and since
-                      the log generally lacks some important information (such as the working
-                      directory in case of a Bazel), it may produce a non-working
-                      compile_commands.json. The mode is primarily intended for debugging
-                      purposes as it doesn't use any knowledge about the build system used and
-                      just parses the strace log file and turns it into compile_commands.json as
-                      is.
-                      Hint: use 'yacce from_log --help' to get CLI arguments help.
+  {bazel,from_log}      Modes of operation. Use "--help" with each mode to get more
+                        information.
+    bazel               Runs a given build system based on Bazel in a shell and extracts
+                        compile_commands.json from it (possibly with individual
+                        compile_commands.json for each external dependency).
+                        This is a default mode activated if the mode specification is just
+                        omitted.
+                        Hint: use 'yacce bazel --help' to get CLI arguments help.
+    from_log            [dbg!] Generates a possibly NON-WORKING(!) compile_commands.json from
+                        a strace log file.
+                        This mode features the most generic way to parse strace output and
+                        since the log generally lacks some important information (such as the
+                        working directory in case of a Bazel), it may produce a non-working
+                        compile_commands.json. The mode is primarily intended for debugging
+                        purposes as it doesn't use any knowledge about the build system used
+                        and just parses the strace log file and turns it into
+                        compile_commands.json as is.
+                        Hint: use 'yacce from_log --help' to get CLI arguments help.
 
 options:
--h, --help            show this help message and exit
---debug {0,1,2,3,4,5,6}
-                      Minimum debug level to show. 0 is the most verbose.
-                      Default level is (info=) 2. Setting it higher than a (warning=) 3 is not
-                      recommended.
---colors, --no-colors
-                      Controls if the output could be colored. (default: True)
+  -h, --help            show this help message and exit
+  --debug {0,1,2,3,4,5,6}
+                        Minimum debug level to show. 0 is the most verbose.
+                        Default level is (info=) 2. Setting it higher than a (warning=) 3 is
+                        not recommended.
+  --colors, --no-colors
+                        Controls if the output could be colored. (default: True)
 ```
 
 ### Options for Bazel mode
 
 ```
 $ yacce bazel -h
+usage: yacce [global options] [bazel] [options (see below)] [-- shell command eventually
+invoking Bazel]
 
-usage: yacce [global options] [bazel] [options (see below)] [-- shell command eventually invoking Bazel]
-
-Yacce extracts compile_commands.json and build system insights from a build system by supervising
-the local compilation process with strace.
+Yacce extracts compile_commands.json and build system insights from a build system by
+supervising the local compilation process with strace.
 Primarily supports Bazel (other build systems might be added later).
 --> Homepage: https://github.com/Arech/yacce
 
 Mode 'bazel' is intended to generate compile_commands.json from tracing execution of a 'bazel
-build' or any other shell command invoking Bazel using the Linux's strace utility. Hence it only
-supports compilation of a single Bazel workspace (including its all external dependencies)
-happening locally. If you are using Bazel's remote caching feature, including '--disk_cache',
-please make sure you're starting with a clean cache, otherwise yacce won't see compilation of
-cache hits.
+build' or any other shell command invoking Bazel using the Linux's strace utility. Hence it
+only supports compilation of a single Bazel workspace (including its all external
+dependencies) happening locally. If you are using Bazel's remote caching feature, including '
+--disk_cache', please make sure you're starting with a clean cache, otherwise yacce won't see
+compilation of cache hits.
 
 options:
--h, --help            show this help message and exit
---log_file path/to/file
-                      Write strace log to and/or read it from this file.
-                      See also '--from_log'.
-                      Default: 'strace.txt' in the current directory
---external {ignore,combine-with-overridden,to-files,to-external,combine-all}
-                      Determines what to do when a compilation of a project's dependency source
-                      file (from 'external/' subdirectory) is found.
-                      - One option is to just to 'ignore' (remove) it and to leave in the
-                      resulting compile_commands.json *only* commands directly related to the
-                      project.
-                      - The default option 'combine-with-overridden' produces a single
-                      compile_commands.json containing main project's files as well as
-                      dependencies that are stored *outside* of their expected location at
-                      '$(bazel info output_base)/external/<repo>' (this typically happens when
-                      you override a dependency repo location for Bazel when you work on the
-                      project and its dependency simultaneously).
-                      - Option 'to-files' produces individual files nearby the main
-                      compile_commands.json, named like'compile_commands_ext_<repo>.json' for
-                      each external dependency '<repo>' (this might be useful for manual
-                      inspection).
-                      - Option 'to-external' differs from 'to-files' only in the location and
-                      naming of the resulting files. 'to-external' produces an individual
-                      compile_commands.json in each external dependency's directory and is
-                      useful when you're going to open the dependency directory in a parallel
-                      IDE for a close inspection.
-                      - The 'combine-all' option just writes all compilation commands (for the
-                      main project and its dependencies) into a single file.
-                      See '--dest_dir' argument for a default location and/or override for the
-                      main project's compile_commands.json file.
-                      NOTE that since currently yacce doesn't properly process compiler
-                      invocations that aren't related to compiling C or C++ sources (such as
-                      linking only, or compiling ASM files), if '--other_commands' flag is
-                      specified, a compound other_commands.json (containing all other
-                      invocations of a compiler for the main project and its externals) will be
-                      saved nearby the main compile_commands.json irrespective of a value of
-                      this flag.
---bazel_command command_or_filepath
-                      Override which command to run to communicate with the instance of a Bazel
-                      for the build system.
-                      You don't typically need this argument, if you have bazelisk installed.
-                      To set the workspace directory see '--bazel_workspace' argument.
-                      Default: bazel
---bazel_workspace path/to/dir
-                      Overrides Bazel workspace directory to set a current directory context for
-                      the bazel command (see '--bazel_command').
-                      This is useful if yacce needs to be run from an outside of that workspace.
-                      Note that any dir under a real workspace would also work here.
-                      Default: a current working directory
---build_cwd path/to/dir
-                      By default, a shell command to start the build is invoked from the Bazel
-                      workspace directory (see '--bazel_workspace'). This argument allows to
-                      override that and set a different directory as a cwd for the build
-                      command.
-                      Note that this is different from '--cwd' argument, which for the 'bazel
-                      --from_log' mode of yacce specifies a value of '$(bazel info
-                      execution_root)' directory.
---build_shell shell_to_use
-                      Build command is executed by passing it to a shell. By default, 'bash' is
-                      used, but you can override that with this argument.
---ensure_build_succeeds, --no-ensure_build_succeeds
-                      By default yacce only warns if the build command fails (exits with a non-
-                      zero code) and it tries to process the strace log file to produce some
-                      results anyway. If you want to make sure that yacce will only use a full
-                      log of a successful build, set this argument to enforce yacce failure if
-                      the build fails.
-                      (default: False)
---cwd path/to/dir     Path to the working directory of the compilation.
-                      This value goes to a 'directory' field of an entry of
-                      compile_commands.json and is used to resolve relative paths found in the
-                      command. If '--ignore-not-found' argument isn't set, yacce will try to
-                      test if mentioned files exist in this directory and warn if they aren't.
-                      Note that passing the file existence test helps, but doesn't guarantee
-                      that the resulting compile_commands.json will be correct.
-                      In the 'yacce bazel --from_log' mode, this argument overrides an output of
-                      '$(bazel info execution_root)' (i.e. this enables parsing of an existing
-                      log file without querying its build system). In the default live mode
-                      (when no '--from_log' argument is specified) this argument is either has
-                      to be unset, or match the output of '$(bazel info execution_root)'.
---ignore-not-found, --no-ignore-not-found
-                      If set, will not test if files to be added to .json exists.
-                      (default: False)
--o, --other_commands, --no-other_commands
-                      If set, yacce will also generate other_commands.json file.
-                      This file has a similar to compile_commands.json format, but contains all
-                      other compiler invocations found that aren't useful for gathering C++
-                      symbol information of the project, but handy to get insights about the
-                      build in general (such as for compiling assembler sources or for linking).
-                      Note that yacce currently does not implement attribution of other
-                      compilation commands to the project's external dependencies. I.e. all
-                      other commands related to compiling non-C++ sources and linking will be
-                      combined into a single other_commands.json file irrespective of '--
-                      external' argument setting. (default: False)
---save_duration, --no-save_duration
-                      If set, yacce will add a 'duration_s' field into the resulting .json that
-                      contain how long the command run in seconds with a microsecond resolution.
-                      This feature currently doesn't have automated use, but the file can be
-                      inspected manually, or with a custom script to obtain build system
-                      performance insights.
-                      WARNING: current clangd gets upset when it finds a field it doesn't know,
-                      so enabling this option might prevent you from using clangd with the
-                      resulting file!
-                      (default: False)
---save_line_num, --no-save_line_num
-                      If set, yacce will add a 'line_num' integer field into the resulting .json
-                      that contain a line number of the compiler call in the strace log file.
-                      Useful for debugging, but have no automated use.
-                      WARNING: current clangd gets upset when it finds a field it doesn't know,
-                      so enabling this option might prevent you from using clangd with the
-                      resulting file!
-                      (default: False)
---discard_outputs_with_pfx [path/prefix ...]
-                      A build system can compile some dummy source files only to gather
-                      information about compiler capabilities. Presence of these files in the
-                      compile_commands.json aren't usually helpful. Typically, such files are
-                      placed into /tmp or /dev/null, but other variants are possible.
-                      This setting allows to fully customize which prefixes of a compiler's
-                      output file should lead to ignoring the compilation call.
-                      Pass an empty string "" to disable. Accepts multiple values at once.
-                      Default: ['/dev/null', '/tmp/'].
---discard_sources_with_pfx [path/prefix ...]
-                      Similar to --discard_outputs_with_pfx, but controls which prefixes of
-                      source files should lead to ignoring the compiler call.
-                      Pass an empty string "" to disable. Accepts multiple values at once.
-                      Default: [''].
---discard_args_with_pfx [+compiler_arg_prefix ...]
-                      Certain compiler arguments, such as sanitizers, are known to choke clangd.
-                      Some others like those concerning build reproducibility might be useless
-                      for C++ symbols.
-                      Set a value of this parameter to a sequence of prefixes to match and
-                      remove such compiler arguments.
-                      Pass an empty string "" to disable. Accepts multiple values at once.
-                      ATTENTION: since Python's argparse always treats a leading dash in a CLI
-                      argument as a script's argument name, but not value, use a plus sign '+'
-                      instead of a dash '-' to specify a leading dash. Example: instead of
-                      '-fsanitize' use '+fsanitize'.
-                      Default: ['+fsanitize'].
---discard_args [+compiler_arg_or_args_pair_spec ...]
-                      Similarly to '--discard_args_with_pfx', values for this argument define a
-                      set of compiler arguments (such as '-DMY_DEF=VALUE') or pipe-delimited
-                      argument pairs (like a single token value '-I|/certain/dir' defines a two
-                      token pair '-I /certain/dir') that will be removed from a compiler
-                      invocation.
-                      Note that a single token specification of a '-D' compiler argument has a
-                      special handling and also addresses its two token alternatives.
-                      Pass an empty string "" to disable. Accepts multiple values at once.
-                      ATTENTION: since Python's argparse always treats a leading dash in a CLI
-                      argument as a script's argument name, but not value, use a plus sign '+'
-                      instead of a dash '-' to specify a leading dash. For the above it's
-                      '+DMY_DEF=VALUE' and '+I|/certain/dir'.
-                      Default: ['+DADDRESS_SANITIZER'].
---enable_dupes_check, --no-enable_dupes_check
-                      If set, yacce will report if a pair <source, output> isn't unique.
-                      Usefulness of this flag solely depends on actual build system
-                      implementation. Some might use lots of temporary compilations just to
-                      gather compiler capabilities which could lead to an avalanche of false
-                      positives. This could be mitigated with --discard* family of flags, but
-                      this requires manual intervention, hence it's disabled by default.
-                      (default: False)
--c [compiler_basename_or_path_fragment ...], --compiler [compiler_basename_or_path_fragment ...]
-                      Adds an absolute path, a basename, a path suffix, or a path prefix
-                      (prepend it with a plus '+' symbol) of a custom compiler to the set of
-                      compilers already detectable by yacce. Accepts multiple values at once.
-                      --not_compiler [compiler_basename_or_path_fragment ...]
-                      You can prevent a certain absolute path, a basename, a path suffix, or a
-                      path prefix (prepend it with a plus '+' symbol) from being treated as a
-                      compiler by using this argument. Accepts multiple values at once.
---enable_compiler_scripts, --no-enable_compiler_scripts
-                      By default, yacce doesn't treat a script (classified by a shebang #! in
-                      the first 2 bytes of the file) invocation as a compiler invocation and
-                      ignores it. Set this option when this behavior is unwanted.
-                      (default: False)
--d dir/path, --dest_dir dir/path
-                      Destination directory in which yacce should create resulting .json files.
-                      Must exist.
-                      Default: directory of the log file (see '--log_file')
+  -h, --help            show this help message and exit
+  --log_file path/to/file
+                        Write strace log to and/or read it from this file.
+                        See also '--from_log'.
+                        Default: 'strace.txt' in the current directory,
+                        /home/arech/Documents/src/my/yacce/mantest/strace.txt
+  --external {ignore,combine-with-overridden,to-files,to-external,combine-all}
+                        Determines what to do when a compilation of a project's dependency
+                        source file (from 'external/' subdirectory) is found.
+                        - One option is to just to 'ignore' (remove) it and to leave in the
+                        resulting compile_commands.json *only* commands directly related to
+                        the project.
+                        - The default option 'combine-with-overridden' produces a single
+                        compile_commands.json containing main project's files as well as
+                        dependencies that are stored *outside* of their expected location at
+                        '$(bazel info output_base)/external/<repo>' (this typically happens
+                        when you override a dependency repo location for Bazel when you work
+                        on the project and its dependency simultaneously).
+                        - Option 'to-files' produces individual files nearby the main
+                        compile_commands.json, named like'compile_commands_ext_<repo>.json'
+                        for each external dependency '<repo>' (this might be useful for
+                        manual inspection).
+                        - Option 'to-external' differs from 'to-files' only in the location
+                        and naming of the resulting files. 'to-external' produces an
+                        individual compile_commands.json in each external dependency's
+                        directory and is useful when you're going to open the dependency
+                        directory in a parallel IDE for a close inspection.
+                        - The 'combine-all' option just writes all compilation commands (for
+                        the main project and its dependencies) into a single file.
+                        See '--dest_dir' argument for a default location and/or override for
+                        the main project's compile_commands.json file.
+                        NOTE that since currently yacce doesn't properly process compiler
+                        invocations that aren't related to compiling C or C++ sources (such
+                        as linking only, or compiling ASM files), if '--other_commands' flag
+                        is specified, a compound other_commands.json (containing all other
+                        invocations of a compiler for the main project and its externals)
+                        will be saved nearby the main compile_commands.json irrespective of a
+                        value of this flag.
+  --bazel_command command_or_filepath
+                        Override which command to run to communicate with the instance of a
+                        Bazel for the build system.
+                        You don't typically need this argument, if you have bazelisk
+                        installed.
+                        To set the workspace directory see '--bazel_workspace' argument.
+                        Default: bazel
+  --bazel_workspace path/to/dir
+                        Overrides Bazel workspace directory to set a current directory
+                        context for the bazel command (see '--bazel_command').
+                        This is useful if yacce needs to be run from an outside of that
+                        workspace. Note that any dir under a real workspace would also work
+                        here.
+                        Default: a current working directory
+                        '/home/arech/Documents/src/my/yacce/mantest'.
+  --build_cwd path/to/dir
+                        By default, a shell command to start the build is invoked from the
+                        Bazel workspace directory (see '--bazel_workspace'). This argument
+                        allows to override that and set a different directory as a cwd for
+                        the build command.
+                        Note that this is different from '--cwd' argument, which for the
+                        'bazel --from_log' mode of yacce specifies a value of '$(bazel info
+                        execution_root)' directory.
+  --build_shell shell_to_use
+                        Build command is executed by passing it to a shell. By default,
+                        'bash' is used, but you can override that with this argument.
+  --ensure_build_succeeds, --no-ensure_build_succeeds
+                        By default yacce only warns if the build command fails (exits with a
+                        non-zero code) and it tries to process the strace log file to produce
+                        some results anyway. If you want to make sure that yacce will only
+                        use a full log of a successful build, set this argument to enforce
+                        yacce failure if the build fails.
+                        (default: False)
+  --cwd path/to/dir     Path to the working directory of the compilation.
+                        This value goes to a 'directory' field of an entry of
+                        compile_commands.json and is used to resolve relative paths found in
+                        the command. If '--ignore-not-found' argument isn't set, yacce will
+                        try to test if mentioned files exist in this directory and warn if
+                        they aren't. Note that passing the file existence test helps, but
+                        doesn't guarantee that the resulting compile_commands.json will be
+                        correct.
+                        In the 'yacce bazel --from_log' mode, this argument overrides an
+                        output of '$(bazel info execution_root)' (i.e. this enables parsing
+                        of an existing log file without querying its build system). In the
+                        default live mode (when no '--from_log' argument is specified) this
+                        argument is either has to be unset, or match the output of '$(bazel
+                        info execution_root)'.
+  --ignore-not-found, --no-ignore-not-found
+                        If set, will not test if files to be added to .json exists.
+                        (default: False)
+  -o, --other_commands, --no-other_commands
+                        If set, yacce will also generate other_commands.json file.
+                        This file has a similar to compile_commands.json format, but contains
+                        all other compiler invocations found that aren't useful for gathering
+                        C++ symbol information of the project, but handy to get insights
+                        about the build in general (such as for compiling assembler sources
+                        or for linking).
+                        Note that yacce currently does not implement attribution of other
+                        compilation commands to the project's external dependencies. I.e. all
+                        other commands related to compiling non-C++ sources and linking will
+                        be combined into a single other_commands.json file irrespective of '
+                        --external' argument setting. (default: False)
+  --save_duration, --no-save_duration
+                        If set, yacce will add a 'duration_s' field into the resulting .json
+                        that contain how long the command run in seconds with a microsecond
+                        resolution.
+                        This feature currently doesn't have automated use, but the file can
+                        be inspected manually, or with a custom script to obtain build system
+                        performance insights.
+                        WARNING: current clangd gets upset when it finds a field it doesn't
+                        know, so enabling this option might prevent you from using clangd
+                        with the resulting file!
+                        (default: False)
+  --save_line_num, --no-save_line_num
+                        If set, yacce will add a 'line_num' integer field into the resulting
+                        .json that contain a line number of the compiler call in the strace
+                        log file.
+                        Useful for debugging, but have no automated use.
+                        WARNING: current clangd gets upset when it finds a field it doesn't
+                        know, so enabling this option might prevent you from using clangd
+                        with the resulting file!
+                        (default: False)
+  --discard_outputs_with_pfx [path/prefix ...]
+                        A build system can compile some dummy source files only to gather
+                        information about compiler capabilities. Presence of these files in
+                        the compile_commands.json aren't usually helpful. Typically, such
+                        files are placed into /tmp or /dev/null, but other variants are
+                        possible.
+                        This setting allows to fully customize which prefixes of a compiler's
+                        output file should lead to ignoring the compilation call.
+                        Pass an empty string "" to disable. Accepts multiple values at once.
+                        Default: ['/dev/null', '/tmp/'].
+  --discard_sources_with_pfx [path/prefix ...]
+                        Similar to --discard_outputs_with_pfx, but controls which prefixes of
+                        source files should lead to ignoring the compiler call.
+                        Pass an empty string "" to disable. Accepts multiple values at once.
+                        Default: [''].
+  --discard_args_with_pfx [+compiler_arg_prefix ...]
+                        Certain compiler arguments, such as sanitizers, are known to choke
+                        clangd. Some others like those concerning build reproducibility might
+                        be useless for C++ symbols.
+                        Set a value of this parameter to a sequence of prefixes to match and
+                        remove such compiler arguments.
+                        Pass an empty string "" to disable. Accepts multiple values at once.
+                        ATTENTION: since Python's argparse always treats a leading dash in a
+                        CLI argument as a script's argument name, but not value, use a plus
+                        sign '+' instead of a dash '-' to specify a leading dash. Example:
+                        instead of '-fsanitize' use '+fsanitize'.
+                        Default: ['+fsanitize'].
+  --discard_args [+compiler_arg_or_args_pair_spec ...]
+                        Similarly to '--discard_args_with_pfx', values for this argument
+                        define a set of compiler arguments (such as '-DMY_DEF=VALUE') or
+                        pipe-delimited argument pairs (like a single token value
+                        '-I|/certain/dir' defines a two token pair '-I /certain/dir') that
+                        will be removed from a compiler invocation.
+                        Note that a single token specification of a '-D' compiler argument
+                        has a special handling and also addresses its two token alternatives.
+                        Pass an empty string "" to disable. Accepts multiple values at once.
+                        ATTENTION: since Python's argparse always treats a leading dash in a
+                        CLI argument as a script's argument name, but not value, use a plus
+                        sign '+' instead of a dash '-' to specify a leading dash. For the
+                        above it's '+DMY_DEF=VALUE' and '+I|/certain/dir'.
+                        Default: ['+DADDRESS_SANITIZER'].
+  --enable_dupes_check, --no-enable_dupes_check
+                        If set, yacce will report if a pair <source, output> isn't unique.
+                        Usefulness of this flag solely depends on actual build system
+                        implementation. Some might use lots of temporary compilations just to
+                        gather compiler capabilities which could lead to an avalanche of
+                        false positives. This could be mitigated with --discard* family of
+                        flags, but this requires manual intervention, hence it's disabled by
+                        default.
+                        (default: False)
+  -c [compiler_basename_or_path_fragment ...], --compiler [compiler_basename_or_path_fragment ...]
+                        Adds an absolute path, a basename, a path suffix, or a path prefix
+                        (prepend it with a plus '+' symbol) of a custom compiler to the set
+                        of compilers already detectable by yacce. Accepts multiple values at
+                        once.
+  --not_compiler [compiler_basename_or_path_fragment ...]
+                        You can prevent a certain absolute path, a basename, a path suffix,
+                        or a path prefix (prepend it with a plus '+' symbol) from being
+                        treated as a compiler by using this argument. Accepts multiple values
+                        at once.
+  --enable_compiler_scripts, --no-enable_compiler_scripts
+                        By default, yacce doesn't treat a script (classified by a shebang #!
+                        in the first 2 bytes of the file) invocation as a compiler invocation
+                        and ignores it. Set this option when this behavior is unwanted.
+                        (default: False)
+  -d dir/path, --dest_dir dir/path
+                        Destination directory in which yacce should create resulting .json
+                        files. Must exist.
+                        Default: directory of the log file (see '--log_file')
 
 Log mode, uses existing strace log and is mutually exclusive with the live mode:
---from_log            Toggles a mode in which yacce will only parse an existing log file
-                      specified by '--log_file', but will not invoke a build system to spy on.
-                      Mutually exclusive with '--keep_log' and requires no build system
-                      arguments passed (no '--' argument and anything after it).
-                      Default: not set, i.e. the mode is not activated.
+  --from_log            Toggles a mode in which yacce will only parse an existing log file
+                        specified by '--log_file', but will not invoke a build system to spy
+                        on.
+                        Mutually exclusive with '--keep_log' and requires no build system
+                        arguments passed (no '--' argument and anything after it).
+                        Default: not set, i.e. the mode is not activated.
 
 Live mode (default), runs a Bazel build system and is mutually exclusive with the log mode:
---keep_log {if_errors,always,never}
-                      Determines conditions of keeping of the strace log file after yacce
-                      finishes. Mutually exclusive with '--from_log'.
-                      Default is 'always' as it might be useful to run yacce in the log mode
-                      with different arguments later on the same log file.
---clean {always,expunge,never}
-                      Determines, if a 'bazel clean' or 'bazel clean --expunge' commands should
-                      be executed before running the build.
-                      Note that if cleaning is disabled, cached (already compiled) sources will
-                      be invisible to yacce and hence will not make it into resulting
-                      compiler_commands.json! (iterative updates aren't supported yet)
-                      Default: not specified, yacce will ask if running 'bazel clean' is ok.
+  --keep_log {if_errors,always,never}
+                        Determines conditions of keeping of the strace log file after yacce
+                        finishes. Mutually exclusive with '--from_log'.
+                        Default is 'always' as it might be useful to run yacce in the log
+                        mode with different arguments later on the same log file.
+  --clean {always,expunge,never}
+                        Determines, if a 'bazel clean' or 'bazel clean --expunge' commands
+                        should be executed before running the build.
+                        Note that if cleaning is disabled, cached (already compiled) sources
+                        will be invisible to yacce and hence will not make it into resulting
+                        compiler_commands.json! (iterative updates aren't supported yet)
+                        Default: not specified, yacce will ask if running 'bazel clean' is
+                        ok.
 ```
 
 ### Generic log parsing mode options
@@ -442,20 +458,21 @@ usage: yacce from_log [-h] [--cwd path/to/dir] [--ignore-not-found | --no-ignore
                       [--enable_dupes_check | --no-enable_dupes_check]
                       [-c [compiler_basename_or_path_fragment ...]]
                       [--not_compiler [compiler_basename_or_path_fragment ...]]
-                      [--enable_compiler_scripts | --no-enable_compiler_scripts] [-d dir/path]
+                      [--enable_compiler_scripts | --no-enable_compiler_scripts]
+                      [-d dir/path]
                       log_file
 
-Yacce extracts compile_commands.json and build system insights from a build system by supervising
-the local compilation process with strace.
+Yacce extracts compile_commands.json and build system insights from a build system by
+supervising the local compilation process with strace.
 Primarily supports Bazel (other build systems might be added later).
 --> Homepage: https://github.com/Arech/yacce
 
-Mode 'from_log' is a supplementary mode that generates a compile_commands.json from a strace log
-file without using any additional information about build system.
-ATTENTION: this mode is intended for debugging purposes only and most likely will not produce a
-correct compile_commands.json due to a lack of information about the build process details.
-If you want to regenerate compile_commands from a log file for Bazel, use 'yacce bazel --from_log'
-instead.
+Mode 'from_log' is a supplementary mode that generates a compile_commands.json from a strace
+log file without using any additional information about build system.
+ATTENTION: this mode is intended for debugging purposes only and most likely will not produce
+a correct compile_commands.json due to a lack of information about the build process details.
+If you want to regenerate compile_commands from a log file for Bazel, use 'yacce bazel
+--from_log' instead.
 
 positional arguments:
   log_file              Path to the strace log file to parse.
@@ -464,47 +481,52 @@ options:
   -h, --help            show this help message and exit
   --cwd path/to/dir     Path to the working directory of the compilation.
                         This value goes to a 'directory' field of an entry of
-                        compile_commands.json and is used to resolve relative paths found in the
-                        command. If '--ignore-not-found' argument isn't set, yacce will try to
-                        test if mentioned files exist in this directory and warn if they aren't.
-                        Note that passing the file existence test helps, but doesn't guarantee
-                        that the resulting compile_commands.json will be correct.
-                        In the 'from_log' mode a relative path specification is resolved to the
-                        absolute path using a directory of the log file.
+                        compile_commands.json and is used to resolve relative paths found in
+                        the command. If '--ignore-not-found' argument isn't set, yacce will
+                        try to test if mentioned files exist in this directory and warn if
+                        they aren't. Note that passing the file existence test helps, but
+                        doesn't guarantee that the resulting compile_commands.json will be
+                        correct.
+                        In the 'from_log' mode a relative path specification is resolved to
+                        the absolute path using a directory of the log file.
                         Default: directory of the log file.
   --ignore-not-found, --no-ignore-not-found
                         If set, will not test if files to be added to .json exists.
                         (default: False)
   -o, --other_commands, --no-other_commands
                         If set, yacce will also generate other_commands.json file.
-                        This file has a similar to compile_commands.json format, but contains all
-                        other compiler invocations found that aren't useful for gathering C++
-                        symbol information of the project, but handy to get insights about the
-                        build in general (such as for compiling assembler sources or for linking).
+                        This file has a similar to compile_commands.json format, but contains
+                        all other compiler invocations found that aren't useful for gathering
+                        C++ symbol information of the project, but handy to get insights
+                        about the build in general (such as for compiling assembler sources
+                        or for linking).
                         (default: False)
   --save_duration, --no-save_duration
-                        If set, yacce will add a 'duration_s' field into the resulting .json that
-                        contain how long the command run in seconds with a microsecond resolution.
-                        This feature currently doesn't have automated use, but the file can be
-                        inspected manually, or with a custom script to obtain build system
+                        If set, yacce will add a 'duration_s' field into the resulting .json
+                        that contain how long the command run in seconds with a microsecond
+                        resolution.
+                        This feature currently doesn't have automated use, but the file can
+                        be inspected manually, or with a custom script to obtain build system
                         performance insights.
-                        WARNING: current clangd gets upset when it finds a field it doesn't know,
-                        so enabling this option might prevent you from using clangd with the
-                        resulting file!
+                        WARNING: current clangd gets upset when it finds a field it doesn't
+                        know, so enabling this option might prevent you from using clangd
+                        with the resulting file!
                         (default: False)
   --save_line_num, --no-save_line_num
-                        If set, yacce will add a 'line_num' integer field into the resulting .json
-                        that contain a line number of the compiler call in the strace log file.
+                        If set, yacce will add a 'line_num' integer field into the resulting
+                        .json that contain a line number of the compiler call in the strace
+                        log file.
                         Useful for debugging, but have no automated use.
-                        WARNING: current clangd gets upset when it finds a field it doesn't know,
-                        so enabling this option might prevent you from using clangd with the
-                        resulting file!
+                        WARNING: current clangd gets upset when it finds a field it doesn't
+                        know, so enabling this option might prevent you from using clangd
+                        with the resulting file!
                         (default: False)
   --discard_outputs_with_pfx [path/prefix ...]
                         A build system can compile some dummy source files only to gather
-                        information about compiler capabilities. Presence of these files in the
-                        compile_commands.json aren't usually helpful. Typically, such files are
-                        placed into /tmp or /dev/null, but other variants are possible.
+                        information about compiler capabilities. Presence of these files in
+                        the compile_commands.json aren't usually helpful. Typically, such
+                        files are placed into /tmp or /dev/null, but other variants are
+                        possible.
                         This setting allows to fully customize which prefixes of a compiler's
                         output file should lead to ignoring the compilation call.
                         Pass an empty string "" to disable. Accepts multiple values at once.
@@ -515,54 +537,57 @@ options:
                         Pass an empty string "" to disable. Accepts multiple values at once.
                         Default: [''].
   --discard_args_with_pfx [+compiler_arg_prefix ...]
-                        Certain compiler arguments, such as sanitizers, are known to choke clangd.
-                        Some others like those concerning build reproducibility might be useless
-                        for C++ symbols.
+                        Certain compiler arguments, such as sanitizers, are known to choke
+                        clangd. Some others like those concerning build reproducibility might
+                        be useless for C++ symbols.
                         Set a value of this parameter to a sequence of prefixes to match and
                         remove such compiler arguments.
                         Pass an empty string "" to disable. Accepts multiple values at once.
-                        ATTENTION: since Python's argparse always treats a leading dash in a CLI
-                        argument as a script's argument name, but not value, use a plus sign '+'
-                        instead of a dash '-' to specify a leading dash. Example: instead of
-                        '-fsanitize' use '+fsanitize'.
+                        ATTENTION: since Python's argparse always treats a leading dash in a
+                        CLI argument as a script's argument name, but not value, use a plus
+                        sign '+' instead of a dash '-' to specify a leading dash. Example:
+                        instead of '-fsanitize' use '+fsanitize'.
                         Default: ['+fsanitize'].
   --discard_args [+compiler_arg_or_args_pair_spec ...]
-                        Similarly to '--discard_args_with_pfx', values for this argument define a
-                        set of compiler arguments (such as '-DMY_DEF=VALUE') or pipe-delimited
-                        argument pairs (like a single token value '-I|/certain/dir' defines a two
-                        token pair '-I /certain/dir') that will be removed from a compiler
-                        invocation.
-                        Note that a single token specification of a '-D' compiler argument has a
-                        special handling and also addresses its two token alternatives.
+                        Similarly to '--discard_args_with_pfx', values for this argument
+                        define a set of compiler arguments (such as '-DMY_DEF=VALUE') or
+                        pipe-delimited argument pairs (like a single token value
+                        '-I|/certain/dir' defines a two token pair '-I /certain/dir') that
+                        will be removed from a compiler invocation.
+                        Note that a single token specification of a '-D' compiler argument
+                        has a special handling and also addresses its two token alternatives.
                         Pass an empty string "" to disable. Accepts multiple values at once.
-                        ATTENTION: since Python's argparse always treats a leading dash in a CLI
-                        argument as a script's argument name, but not value, use a plus sign '+'
-                        instead of a dash '-' to specify a leading dash. For the above it's
-                        '+DMY_DEF=VALUE' and '+I|/certain/dir'.
+                        ATTENTION: since Python's argparse always treats a leading dash in a
+                        CLI argument as a script's argument name, but not value, use a plus
+                        sign '+' instead of a dash '-' to specify a leading dash. For the
+                        above it's '+DMY_DEF=VALUE' and '+I|/certain/dir'.
                         Default: ['+DADDRESS_SANITIZER'].
   --enable_dupes_check, --no-enable_dupes_check
                         If set, yacce will report if a pair <source, output> isn't unique.
                         Usefulness of this flag solely depends on actual build system
                         implementation. Some might use lots of temporary compilations just to
-                        gather compiler capabilities which could lead to an avalanche of false
-                        positives. This could be mitigated with --discard* family of flags, but
-                        this requires manual intervention, hence it's disabled by default.
+                        gather compiler capabilities which could lead to an avalanche of
+                        false positives. This could be mitigated with --discard* family of
+                        flags, but this requires manual intervention, hence it's disabled by
+                        default.
                         (default: False)
   -c [compiler_basename_or_path_fragment ...], --compiler [compiler_basename_or_path_fragment ...]
                         Adds an absolute path, a basename, a path suffix, or a path prefix
-                        (prepend it with a plus '+' symbol) of a custom compiler to the set of
-                        compilers already detectable by yacce. Accepts multiple values at once.
+                        (prepend it with a plus '+' symbol) of a custom compiler to the set
+                        of compilers already detectable by yacce. Accepts multiple values at
+                        once.
   --not_compiler [compiler_basename_or_path_fragment ...]
-                        You can prevent a certain absolute path, a basename, a path suffix, or a
-                        path prefix (prepend it with a plus '+' symbol) from being treated as a
-                        compiler by using this argument. Accepts multiple values at once.
+                        You can prevent a certain absolute path, a basename, a path suffix,
+                        or a path prefix (prepend it with a plus '+' symbol) from being
+                        treated as a compiler by using this argument. Accepts multiple values
+                        at once.
   --enable_compiler_scripts, --no-enable_compiler_scripts
-                        By default, yacce doesn't treat a script (classified by a shebang #! in
-                        the first 2 bytes of the file) invocation as a compiler invocation and
-                        ignores it. Set this option when this behavior is unwanted.
+                        By default, yacce doesn't treat a script (classified by a shebang #!
+                        in the first 2 bytes of the file) invocation as a compiler invocation
+                        and ignores it. Set this option when this behavior is unwanted.
                         (default: False)
   -d dir/path, --dest_dir dir/path
-                        Destination directory in which yacce should create resulting .json files.
-                        Must exist.
+                        Destination directory in which yacce should create resulting .json
+                        files. Must exist.
                         Default: current working directory.
 ```
