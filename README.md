@@ -90,14 +90,16 @@ Give yacce a try with `pip install yacce`! Prepend the build command with `yacce
 > `clangd.arguments` an item with a content `--compile-commands-dir=${workspaceFolder}` (or any
 > other path). It might not use the `compiler_commands.json` without that.
 
-## Example
-
-*An elaborate way to say "just prepend your build script with `yacce -- `"*
+## Examples of extracting compile_commands.json from Bazel with yacce
 
 First, install yacce with `pip install yacce`. Python 3.10+ is supported.
 
 Second, ensure you have [strace](https://man7.org/linux/man-pages/man1/strace.1.html) installed with
 `sudo apt install strace`. Some distributions have it installed by default.
+
+### Example 1, extracting compile_commands.json for JAX (`jaxlib`)
+
+*An elaborate way to say "just prepend your build script with `yacce -- `"*
 
 JAX is one of Google's machine learning frameworks. Part of it is written in Python, while high
 performance code is in C++. A compiled part is called `jaxlib` and is responsible for parts of JAX
@@ -125,15 +127,14 @@ the same XLA commit, that's designed for JAX v0.7.2. Time to build!
 
 Without yacce, I'd use the following command inside the `./jax` directory:
 ```bash
-python3 ./build/build.py build --wheels=jaxlib --verbose --use_clang false \
+jax$ python3 ./build/build.py build --wheels=jaxlib --verbose --use_clang false \
   --target_cpu_features=native --bazel_options=--override_repository=xla=../xla
 ```
 
 With yacce, it's just prepending the command with `yacce -- ` like this:
 
 ```bash
-cd ./jax  # since we didn't change the dir yet
-yacce -- python3 ./build/build.py build --wheels=jaxlib --verbose --use_clang false \
+jax$ yacce -- python3 ./build/build.py build --wheels=jaxlib --verbose --use_clang false \
   --target_cpu_features=native --bazel_options=--override_repository=xla=../xla
 ```
 
@@ -160,6 +161,90 @@ Now fire up your IDE and point `clangd` to that file, so it starts indexing it. 
 extension installed, if `/src_jax` is the main opened directory (workspace), then one could open
 Settings / Extensions / clangd, and click "Add Item" for `clangd.arguments` settings, putting
 `--compile-commands-dir=${workspaceFolder}/jax` there and then do ctrl+shift+p, "clangd.restart".
+
+### Example 2, how to extract compile_commands.json for AMD's flavor of JAX (handling several Bazel workspaces)
+
+To build JAX running on AMD GPUs, one would have to work with a `rocm/rocm-jax` meta-repository.
+How to set up the dev environment is described in the
+[appropriate document](https://github.com/ROCm/rocm-jax/blob/0acd84e9d095814f3c2d487ff5c326e56c6d0dc3/DEVSETUP.md) of the repo (we'll
+be using a specific commit `0acd84e9d095814f3c2d487ff5c326e56c6d0dc3` of the repo for reproducibility,
+it corresponds to JAX v0.6.0).
+
+The most important feature of this project in the context of yacce is that after the dev setup is finished
+(more precisely, after `python3 stack.py develop` has been run and
+`./jax_rocm_plugin/Makefile` is generated. Hint: take a look into this file to understand what
+commands actually invoked to build the wheels!), the topmost directory of the repo checkout will contain
+3 bazel workspaces:
+- `./jax_rocm_plugin` is the main workspace one would use to build the `plugin` and `pjrt` wheels,
+- `./jax` is the checkout of a relevant commit of the upstream JAX, that is used as a
+dependency of the ROCm support wheels, and might be needed if one is to rebuild the `jaxlib` wheel
+using own XLA checkout.
+- `./xla` is the checkout of the relevant commit of AMD's fork of XLA. It's used to build
+the wheels as a dependency, and might be useful for running XLA tests on its own.
+
+Typical build procedure to make all 3 wheels (`plugin`, `pjrt` and `jaxlib`) is:
+```bash
+jax_rocm_plugin$ make refresh refresh_jaxlib
+```
+However, this is the case where we can't just prepend `yacce -- ` and get away with it, because
+from the commands in `./jax_rocm_plugin/Makefile` it's obvious that `make refresh` uses Bazel
+workspace `./jax_rocm_plugin`, while `make refresh_jaxlib` uses workspace in `./jax`. Yacce can
+monitor only a single bazel workspace at a time, so we have to split these in two. No special treatment
+for the first part, `make refresh`, is needed, it's just a simple:
+```bash
+jax_rocm_plugin$ yacce -- make refresh
+```
+But we should do something for the second part, `make refresh_jaxlib`: by default, yacce produces
+two files in the current directory:
+- `strace.txt` recording log file (it's useful for re-running
+`compile_commands.json` extraction with a different yacce settings by using old compilation recording,
+but if know which yacce settings you need upfront, you can use `yacce --keep_log if_errors -- ` to
+remove it automatically if build succeeds), and 
+- `compile_commands.json` generated from the log.
+
+While for building jaxlib we can instruct yacce to generate these files in a different directory
+(`./jax` is the most suitable one), it's easier just to invoke yacce from this different directory
+and instruct it to switch to a different directory before running the build script. The latter
+is done with a single `--build_cwd` argument. Here's the full commands line for that to execute from
+`./jax` directory:
+```bash
+jax$ yacce --build_cwd ../jax_rocm_plugin -- make refresh_jaxlib
+```
+This will generate `compile_commands.json` for jaxlib in `./jax` directory.
+
+### Example 3, extracting compile_commands.json while running bazel test for XLA
+
+Yacce can extract compile_commands.json from running any script as long as it eventually
+builds a single bazel workspace. Running `bazel test` when no tests are built is an example where
+this could be useful. We could just run it under yacce and after bazel reports it finished compiling
+of all tests, just cancel tests execution with Ctrl+C to let yacce proceed with compile_commands
+generation faster.
+
+In relation to tests of ROCm fork of XLA (we'll use a dev environment from the previous example),
+there are two things to be aware of:
+1. The [testing script](github.com/ROCm/xla/blob/rocm-jaxlib-v0.6.0/build_tools/rocm/run_xla.sh)
+`./build_tools/rocm/run_xla.sh` uses Bazel `--disk_cache` argument to setup local caching. This
+speeds up re-builds of the project, but prevents yacce from seeing compilation of a cached entity.
+The fix for this is either disable disk caching for run under yacce (require modification of the
+`run_xla.sh` script) or just start from a clean cache. We'll do the latter by calling
+`rm -rf /tf/disk_cache/rocm-jaxlib-v0.6.0` before running yacce.
+2. XLA tests are built with sanitizers, and most of them aren't working well under `strace`.
+Typically this results in just test failures. This is fine, since we're running the tests script for producing
+`compile_commands.json`. Just be aware of that.
+  - another thing to be aware of is that `clangd`, as of now, chokes when it finds use of sanitizers
+  in `compile_commands.json`, but yacce by default removes compilation arguments related to that.
+  If needed, you can control that behaviour with certain yacce switches, see below.
+
+Therefore, we need to run yacce in the following manner from `./xla` directory:
+```bash
+xla$ rm -rf /tf/disk_cache/rocm-jaxlib-v0.6.0 \
+    yacce -- ./build_tools/rocm/run_xla.sh
+```
+
+After bazel reports that it finished compiling and runs only test jobs (these will start to fail due
+sanitizers incompatibility with strace), hit Ctrl+C to stop tests execution early and let yacce generate
+`compile_commands.json` from the build log.
+
 
 ## Modes of yacce operation and how to configure them
 
