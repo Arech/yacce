@@ -237,7 +237,7 @@ Typically this results in just test failures. This is fine, since we're running 
 
 Therefore, we need to run yacce in the following manner from `./xla` directory:
 ```bash
-xla$ rm -rf /tf/disk_cache/rocm-jaxlib-v0.6.0 \
+xla$ rm -rf /tf/disk_cache/rocm-jaxlib-v0.6.0 ; \
     yacce -- ./build_tools/rocm/run_xla.sh
 ```
 

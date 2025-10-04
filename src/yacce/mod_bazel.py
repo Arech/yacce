@@ -19,6 +19,7 @@ from .common import (
     CompileCommand,
     escapePath,
     # OtherCommand,
+    kCommonEpilog,
     kMainDescription,
     LoggingConsole,
     storeJson,
@@ -39,6 +40,7 @@ def _getArgs(
         "happening locally. If you are using Bazel's remote "
         "caching feature, including '--disk_cache', please make sure you're starting with a clean "
         "cache, otherwise yacce won't see compilation of cache hits.",
+        epilog=kCommonEpilog,
         usage="yacce [global options] [bazel] [options (see below)] [-- shell command eventually invoking Bazel]",
         formatter_class=BetterHelpFormatter,
         # argparse.RawTextHelpFormatter, #RawDescriptionHelpFormatter,
@@ -125,13 +127,13 @@ def _getArgs(
         "You don't typically need this argument, if you have bazelisk installed.\n"
         "To set the workspace directory see '--bazel_workspace' argument.\n"
         "Default: %(default)s",
-        metavar='command_or_filepath'
+        metavar="command_or_filepath",
     )
 
     parser.add_argument(
         "--bazel_workspace",
         help="Overrides Bazel workspace directory to set a current directory context for the bazel command (see "
-        "'--bazel_command').\n" \
+        "'--bazel_command').\n"
         "This is useful if yacce needs to be run from an outside of that "
         "workspace. Note that any dir under a real workspace would also work here.\n"
         "Default: a current working directory '%(default)s'.",
@@ -143,7 +145,7 @@ def _getArgs(
         "--build_cwd",
         help="By default, a shell command to start the build is invoked from the Bazel workspace "
         "directory (see '--bazel_workspace'). This argument allows to override that and set a "
-        "different directory as a cwd for the build command.\n" \
+        "different directory as a cwd for the build command.\n"
         "Note that this is different from '--cwd' argument, which "
         "for the 'bazel --from_log' mode of yacce specifies a value of '$(bazel info execution_root)' directory.",
         metavar="path/to/dir",
@@ -226,16 +228,21 @@ class BazelParser(BaseParser):
         do_test_files = not args.ignore_not_found
         setattr(args, "ignore_not_found", True)
 
-        super().__init__(Con, args)
+        super().__init__(Con, args, apply_cwd=False)
 
+        self._apply_cwd = True
         setattr(args, "ignore_not_found", do_test_files)
         self._test_files = do_test_files
+
+        # resetting these after the base class
+        self._compiler_is_script = set()
+        self._not_script = set()
 
         Con.trace("Starting Bazel-specific processing...")
         self._update()
 
     def _makeFullPath(
-        self, is_external: bool, subdir: str, path_ending: str, is_file: bool, warn=True
+        self, is_external: bool, subdir: str, path_ending: str, is_file: bool, *, warn=True
     ) -> tuple[str, bool]:
         exists = False
         fullpath = os.path.realpath(os.path.join(self._cwd, subdir, path_ending))
@@ -320,30 +327,36 @@ class BazelParser(BaseParser):
             )
             for ccidx, cc in enumerate(self.compile_commands):
                 cctime = self.compile_cmd_time[ccidx]
-                args, output, source, line_num = cc
+                args, output, sources, line_num = cc
 
-                # deciding if this is external
-                m_external = r_any_external.match(source)
-                if m_external:
-                    repo = m_external.group(1)
-                    if repo not in ext_paths:
-                        repo_path, exists = self._makeFullPath(True, "external", repo, False)
-                        if self._test_files and not exists:
-                            self.Con.warning(
-                                f"External repo '{repo}' not found at expected path '{repo_path}'"
-                            )
-                        ext_paths[repo] = repo_path
-                else:
-                    repo = None
+                # processing sources
+                for src_idx in range(len(sources)):
+                    src = sources[src_idx]
+                    # deciding if this is external
+                    m_external = r_any_external.match(src)
+                    if m_external:
+                        repo = m_external.group(1)
+                        if repo not in ext_paths:
+                            repo_path, exists = self._makeFullPath(True, "external", repo, False)
+                            if self._test_files and not exists:
+                                self.Con.warning(
+                                    f"External repo '{repo}' referenced by source file {src} in log line#{line_num} not found at expected path '{repo_path}'"
+                                )
+                            ext_paths[repo] = repo_path
+                    else:
+                        repo = None
 
-                # checking and updating the source path
-                path, exists = self._makeFullPath(
-                    bool(r_external.match(source)), "", unescapePath(source), True
-                )
-                if self._test_files and not exists:
-                    self.Con.warning("Source file", path, "not found!")
-                source = escapePath(path)
-                # no need to check and update output
+                    # checking and updating the source path
+                    path, exists = self._makeFullPath(
+                        bool(r_external.match(src)), "", unescapePath(src), True
+                    )
+                    if self._test_files and not exists:
+                        self.Con.warning(
+                            f"Source file '{path}' referenced as '{src}' in log line#{line_num} not found!"
+                        )
+                    sources[src_idx] = path # by convention, storeJson() does escapePath()
+
+                # no need to check and update the output file
 
                 # new_args = []
                 next_is_path = False
@@ -364,7 +377,7 @@ class BazelParser(BaseParser):
                     # new_args.append(arg)
 
                 # new_cc = CompileCommand(new_args, output, source, line_num)
-                new_cc = CompileCommand(args, output, source, line_num)
+                new_cc = CompileCommand(args, output, sources, line_num)
                 if m_external:
                     ext_ccs.setdefault(repo, []).append(new_cc)
                     ext_cctimes.setdefault(repo, []).append(cctime)
@@ -751,7 +764,7 @@ class BazelWrap:
             stdout = run_res.stdout.decode("utf-8").rstrip()
             self.Con.info(f"Using {stdout}")
         except Exception as e:
-            raise YacceException("Failed to check 'strace' utility version: {e}")
+            raise YacceException(f"Failed to check 'strace' utility version: {e}")
 
     def _bazelClean(self, expunge: bool) -> None:
         self.Con.info(f"Cleaning the build{' with --expunge' if expunge else ''}...")
@@ -884,11 +897,12 @@ class BazelWrap:
                     if ensure_build_succeeds:
                         raise YacceException(
                             f"{msg} Yacce was requested to ensure build succeeds, so aborting. "
-                            "If you want to proceed anyway, don't set --ensure_build_succeeds argument."
+                            "If you want to proceed anyway, don't set '--ensure_build_succeeds' argument."
                         )
                     self.Con.warning(
                         f"{msg} Processing the log anyway even though the log might be incomplete "
-                        "or corrupted. To enforce yacce failure if build fails, set --ensure_build_succeeds argument."
+                        "or corrupted (expect some warnings due to that). To enforce yacce failure "
+                        "if a build fails, set '--ensure_build_succeeds' argument."
                     )
 
             except Exception as e:
