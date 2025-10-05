@@ -7,7 +7,7 @@ import os
 import re
 import rich.console
 import rich.progress
-import textwrap
+#import textwrap
 
 
 class YacceException(RuntimeError):
@@ -364,7 +364,7 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         nargs="*",
     )
 
-    parser.add_argument(  # TODO IMPLEMENT
+    parser.add_argument(
         "--not_compiler",
         help="You can prevent a certain absolute path, a basename, a path suffix, or a path prefix "
         "(prepend it with a plus '+' symbol) from being treated as a compiler by using "
@@ -373,7 +373,7 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         nargs="*",
     )
 
-    parser.add_argument(  # TODO IMPLEMENT
+    parser.add_argument(
         "--enable_compiler_scripts",
         help="By default, yacce doesn't treat a script (classified by testing for shebang '#!' sequence in the first 2 "
         "bytes of the file) invocation as a compiler invocation and ignores it. Set this option "
@@ -695,8 +695,11 @@ class BaseParser:
         # In general, BaseParser is meant to only convert an strace output into a structured form.
         # It should NOT rely on any assumptions about build system functioning. cwd is actually one
         # of them, hence apply_cwd is needed when a derived parser has its own logic of cwd application
-        self._cwd = os.path.realpath(args.cwd)
+        self._cwd = os.path.realpath(os.path.expanduser(args.cwd))
+        setattr(args, "cwd", self._cwd)
         self._apply_cwd = apply_cwd
+        # note that if _test_files / !ignore_not_found is set, while _apply_cwd isn't, yacce can't actually test most
+        # files, since cwd expansion is forbidden.
 
         self._discard_outputs = PathFilter(args.discard_outputs)
         self._discard_sources = PathFilter(args.discard_sources)
@@ -924,7 +927,6 @@ class BaseParser:
                     f"{ts:.6f} which is before it started at "
                     f"{start_ts:.6f}. Continuing, but the log file might be malformed."
                 )
-                # todo: save this to errors
         else:
             self.Con.warning(
                 f"pid {pid} (started at line {start_line_num}) didn't log its exit. "
@@ -1002,9 +1004,10 @@ class BaseParser:
 
     def _expandPath(self, path: str, lpa: tuple, f_reject_true) -> str | None:
         """Expands an ESCAPED! path to an absolute real path optionally trying to reject it on each step.
-        Returns NOT-ESCAPED path"""
+        Obeys _apply_cwd and _test_files requirements.
+        Returns NOT-ESCAPED path."""
         try_reject = f_reject_true is not None
-        path = unescapePath(path)
+        path = os.path.expanduser(unescapePath(path))
         orig_arg = path
 
         if try_reject and f_reject_true(path):
@@ -1328,7 +1331,7 @@ class BaseParser:
             else:
                 self.Con.error(
                     f"Line {line_num}: pid {pid} has @file argument#{i} '{args[i]}' that doesn't "
-                    "reference existing file. Processing might yield incomplete results."
+                    "reference an existing file. Processing might yield incomplete results."
                 )
                 # do nothing
         return args
@@ -1530,7 +1533,7 @@ def escapePath(path: str) -> str:
 
 
 def toAbsPathUnescape(cwd: str, path: str) -> str:
-    path = unescapePath(path)
+    path = os.path.expanduser(unescapePath(path))
     if not os.path.isabs(path):
         path = os.path.join(cwd, path)
     return os.path.realpath(path)  # resolve symlinks so isfile() or isdir() works properly

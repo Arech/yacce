@@ -285,9 +285,9 @@ class BazelParser(BaseParser):
         # matches a whole external/... part in bazel-../../external/.. path spec
         r_bazel_external = re.compile(r"^(?:\.\/)?bazel-[^\/]+\/[^\/]+\/bin\/(external\/.+)$")
 
-        def _fix_path(arg: str, argidx: int, args: list[str] | None) -> str:
+        def _fixDirPath(orig_path: str, argidx: int, args: list[str] | None) -> str:
             nonlocal extinc_paths, notfound_inc
-            m_ext = r_any_external.match(arg)
+            m_ext = r_any_external.match(orig_path)
             if m_ext:
                 r = m_ext.group(1)
                 if r not in extinc_paths:
@@ -299,14 +299,14 @@ class BazelParser(BaseParser):
                     extinc_paths[r] = repo_path
 
             path, exists = self._makeFullPath(
-                bool(r_external.match(arg)), "", unescapePath(arg), False, warn=False
+                bool(r_external.match(orig_path)), "", unescapePath(orig_path), False, warn=False
             )
             if self._test_files and not exists:
                 err = True
                 if args is not None:
                     # ignoring existence test failure for same qualified args starting with bazel-out/k8-opt/bin/external/... dirs
                     # that exist as just normally qualified external/... args. This seems to be a bazel quirk
-                    m_bzl_ext = r_bazel_external.match(arg)
+                    m_bzl_ext = r_bazel_external.match(orig_path)
                     if m_bzl_ext:
                         ext = m_bzl_ext.group(1)
                         qual = args[argidx - 1]  # can't be negative
@@ -317,7 +317,7 @@ class BazelParser(BaseParser):
                                 err = False
                                 break
                 if err:
-                    notfound_inc.add(arg)
+                    notfound_inc.add(orig_path)
             return escapePath(path)
 
         with Progress(console=self.Con) as progress:  # transient=True,
@@ -364,7 +364,8 @@ class BazelParser(BaseParser):
                     # resolving symlinks to reduce dependency on bazel's internal workspace structure
                     if next_is_path:
                         next_is_path = False
-                        args[argidx] = _fix_path(arg, argidx, args)
+                        #TODO special handling for output is needed here too
+                        args[argidx] = _fixDirPath(arg, argidx, args)
                     elif arg in self.kArgIsPath and (
                         arg not in self.kCheckArgForSysrootSpec
                         or not arg.startswith(self.kSysrootSpec)
@@ -373,7 +374,8 @@ class BazelParser(BaseParser):
                     elif m_pfx_arg := self.r_pfx_arg_is_path.match(arg):
                         path_part = arg[m_pfx_arg.end() :].lstrip()
                         if path_part:
-                            args[argidx] = m_pfx_arg.group() + _fix_path(path_part, argidx, None)
+                            #TODO special handling for output is needed here too
+                            args[argidx] = m_pfx_arg.group() + _fixDirPath(path_part, argidx, None)
                     # new_args.append(arg)
 
                 # new_cc = CompileCommand(new_args, output, source, line_num)
@@ -552,9 +554,9 @@ class BazelWrap:
         assert hasattr(args, "from_log") and hasattr(args, "build_cwd")
         self._bazel: str = args.bazel_command
 
-        args.log_file = os.path.realpath(args.log_file)
+        args.log_file = os.path.realpath(os.path.expanduser(args.log_file))
 
-        args.bazel_workspace = os.path.realpath(args.bazel_workspace)
+        args.bazel_workspace = os.path.realpath(os.path.expanduser(args.bazel_workspace))
         if not os.path.isdir(args.bazel_workspace):
             raise YacceException(
                 f"Bazel workspace directory '{args.bazel_workspace}' doesn't exist.\n"
@@ -612,7 +614,7 @@ class BazelWrap:
         """If necessary, queries bazel for execution root and modifies args to set it as cwd."""
         assert hasattr(args, "cwd")
         if args.cwd:
-            args.cwd = os.path.realpath(args.cwd)
+            args.cwd = os.path.realpath(os.path.expanduser(args.cwd))
             # only querying bazel if the build system has to be run. Pure "from_log" should be able
             # to work even on a different machine.
             if not self._from_log:
@@ -680,7 +682,7 @@ class BazelWrap:
         assert args.log_file and args.keep_log
 
         if args.build_cwd:
-            args.build_cwd = os.path.realpath(args.build_cwd)
+            args.build_cwd = os.path.realpath(os.path.expanduser(args.build_cwd))
             if not os.path.isdir(args.build_cwd):
                 raise YacceException(
                     f"Build system working directory '{args.build_cwd}' doesn't exist.\n"
