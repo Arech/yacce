@@ -400,7 +400,9 @@ options:
                         argument is either has to be unset, or match the output of '$(bazel
                         info execution_root)'.
   --ignore-not-found, --no-ignore-not-found
-                        If set, will not test if files to be added to .json exists.
+                        If the flag is set, yacce will not test if files to be added to .json
+                        exists, and will not attempt to test if an invoked compiler is a
+                        script wrapper.
                         (default: False)
   -o, --other_commands, --no-other_commands
                         If set, yacce will also generate other_commands.json file.
@@ -434,19 +436,21 @@ options:
                         know, so enabling this option might prevent you from using clangd
                         with the resulting file!
                         (default: False)
-  --discard_outputs_with_pfx [path/prefix ...]
+  --discard_outputs [PathFilter ...]
                         A build system can compile some dummy source files only to gather
                         information about compiler capabilities. Presence of these files in
                         the compile_commands.json aren't usually helpful. Typically, such
                         files are placed into /tmp or /dev/null, but other variants are
                         possible.
-                        This setting allows to fully customize which prefixes of a compiler's
-                        output file should lead to ignoring the compilation call.
+                        This setting lets you customize finding which compiler output files
+                        should lead to ignoring the whole compilation call.
+                        See a 'PathFilter specification' section below for details.
                         Pass an empty string "" to disable. Accepts multiple values at once.
-                        Default: ['/dev/null', '/tmp/'].
-  --discard_sources_with_pfx [path/prefix ...]
-                        Similar to --discard_outputs_with_pfx, but controls which prefixes of
-                        source files should lead to ignoring the compiler call.
+                        Default: ['/dev/null', '/tmp/+', '+/.cache/ccache/tmp/+'].
+  --discard_sources [PathFilter ...]
+                        Similar to --discard_outputs, but controls which source file path
+                        patterns should lead to ignoring the compiler call.
+                        See a 'PathFilter specification' section below for details.
                         Pass an empty string "" to disable. Accepts multiple values at once.
                         Default: [''].
   --discard_args_with_pfx [+compiler_arg_prefix ...]
@@ -495,9 +499,10 @@ options:
                         treated as a compiler by using this argument. Accepts multiple values
                         at once.
   --enable_compiler_scripts, --no-enable_compiler_scripts
-                        By default, yacce doesn't treat a script (classified by a shebang #!
-                        in the first 2 bytes of the file) invocation as a compiler invocation
-                        and ignores it. Set this option when this behavior is unwanted.
+                        By default, yacce doesn't treat a script (classified by testing for
+                        shebang '#!' sequence in the first 2 bytes of the file) invocation as
+                        a compiler invocation and ignores it. Set this option when this
+                        behavior is unwanted.
                         (default: False)
   -d dir/path, --dest_dir dir/path
                         Destination directory in which yacce should create resulting .json
@@ -526,6 +531,19 @@ Live mode (default), runs a Bazel build system and is mutually exclusive with th
                         compiler_commands.json! (iterative updates aren't supported yet)
                         Default: not specified, yacce will ask if running 'bazel clean' is
                         ok.
+
+PathFilter specification:
+-------------------------
+Filters are tested before and after applying working directory to a path (if the path tested
+isn't an abs path), and after expanding an abs path to a realpath(). Recognizable filter
+specifications are:
+- exact match: filter not starting or ending on a plus '+' sign
+- match prefix: filter ending with a plus '+' sign. A path starting with the string before
+the plus sign matches the filter.
+- match suffix: filter beginning with a plus '+' sign. A path ending with a substring that
+follows the plus sign matches the filter.
+- substring match: filter beginning with and ending with a plus '+' sign matches as a
+substring.
 ```
 
 ### Generic log parsing mode options
@@ -536,8 +554,8 @@ usage: yacce from_log [-h] [--cwd path/to/dir] [--ignore-not-found | --no-ignore
                       [-o | --other_commands | --no-other_commands]
                       [--save_duration | --no-save_duration]
                       [--save_line_num | --no-save_line_num]
-                      [--discard_outputs_with_pfx [path/prefix ...]]
-                      [--discard_sources_with_pfx [path/prefix ...]]
+                      [--discard_outputs [PathFilter ...]]
+                      [--discard_sources [PathFilter ...]]
                       [--discard_args_with_pfx [+compiler_arg_prefix ...]]
                       [--discard_args [+compiler_arg_or_args_pair_spec ...]]
                       [--enable_dupes_check | --no-enable_dupes_check]
@@ -576,7 +594,9 @@ options:
                         the absolute path using a directory of the log file.
                         Default: directory of the log file.
   --ignore-not-found, --no-ignore-not-found
-                        If set, will not test if files to be added to .json exists.
+                        If the flag is set, yacce will not test if files to be added to .json
+                        exists, and will not attempt to test if an invoked compiler is a
+                        script wrapper.
                         (default: False)
   -o, --other_commands, --no-other_commands
                         If set, yacce will also generate other_commands.json file.
@@ -606,19 +626,21 @@ options:
                         know, so enabling this option might prevent you from using clangd
                         with the resulting file!
                         (default: False)
-  --discard_outputs_with_pfx [path/prefix ...]
+  --discard_outputs [PathFilter ...]
                         A build system can compile some dummy source files only to gather
                         information about compiler capabilities. Presence of these files in
                         the compile_commands.json aren't usually helpful. Typically, such
                         files are placed into /tmp or /dev/null, but other variants are
                         possible.
-                        This setting allows to fully customize which prefixes of a compiler's
-                        output file should lead to ignoring the compilation call.
+                        This setting lets you customize finding which compiler output files
+                        should lead to ignoring the whole compilation call.
+                        See a 'PathFilter specification' section below for details.
                         Pass an empty string "" to disable. Accepts multiple values at once.
-                        Default: ['/dev/null', '/tmp/'].
-  --discard_sources_with_pfx [path/prefix ...]
-                        Similar to --discard_outputs_with_pfx, but controls which prefixes of
-                        source files should lead to ignoring the compiler call.
+                        Default: ['/dev/null', '/tmp/+', '+/.cache/ccache/tmp/+'].
+  --discard_sources [PathFilter ...]
+                        Similar to --discard_outputs, but controls which source file path
+                        patterns should lead to ignoring the compiler call.
+                        See a 'PathFilter specification' section below for details.
                         Pass an empty string "" to disable. Accepts multiple values at once.
                         Default: [''].
   --discard_args_with_pfx [+compiler_arg_prefix ...]
@@ -667,12 +689,26 @@ options:
                         treated as a compiler by using this argument. Accepts multiple values
                         at once.
   --enable_compiler_scripts, --no-enable_compiler_scripts
-                        By default, yacce doesn't treat a script (classified by a shebang #!
-                        in the first 2 bytes of the file) invocation as a compiler invocation
-                        and ignores it. Set this option when this behavior is unwanted.
+                        By default, yacce doesn't treat a script (classified by testing for
+                        shebang '#!' sequence in the first 2 bytes of the file) invocation as
+                        a compiler invocation and ignores it. Set this option when this
+                        behavior is unwanted.
                         (default: False)
   -d dir/path, --dest_dir dir/path
                         Destination directory in which yacce should create resulting .json
                         files. Must exist.
                         Default: current working directory.
+
+PathFilter specification:
+-------------------------
+Filters are tested before and after applying working directory to a path (if the path tested
+isn't an abs path), and after expanding an abs path to a realpath(). Recognizable filter
+specifications are:
+- exact match: filter not starting or ending on a plus '+' sign
+- match prefix: filter ending with a plus '+' sign. A path starting with the string before
+the plus sign matches the filter.
+- match suffix: filter beginning with a plus '+' sign. A path ending with a substring that
+follows the plus sign matches the filter.
+- substring match: filter beginning with and ending with a plus '+' sign matches as a
+substring.
 ```
