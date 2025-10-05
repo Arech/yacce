@@ -7,7 +7,7 @@ import os
 import re
 import rich.console
 import rich.progress
-#import textwrap
+# import textwrap
 
 
 class YacceException(RuntimeError):
@@ -795,6 +795,7 @@ class BaseParser:
                 if unfinished_line is not None:
                     prev_line = unfinished_line
                     unfinished_line = None
+                    assert isinstance(unfinished_args, tuple) and len(unfinished_args) == 4
                     if line.startswith(")"):
                         self._handleExec(*unfinished_args, prev_line + line)
                         continue
@@ -844,6 +845,7 @@ class BaseParser:
                 self.Con.error(
                     "Previous line is marked as unfinished, but this was the last line. Trying to handle it"
                 )
+                assert isinstance(unfinished_args, tuple) and len(unfinished_args) == 4
                 self._handleExec(*unfinished_args, unfinished_line)
 
         # finishing unfinished processes
@@ -991,9 +993,12 @@ class BaseParser:
         return True
 
     def _ignoreExecutable(self, path, lpa: tuple) -> bool:
+        path = unescapePath(path)
         basename = os.path.basename(path)
 
-        path = self._expandPath(path, lpa, lambda p: not self._isCompiler(p, basename))
+        path = self._expandPath(
+            path, lpa, lambda p: not self._isCompiler(p, basename), unescape=False
+        )
         if not path:
             return True
 
@@ -1002,13 +1007,17 @@ class BaseParser:
 
         return False
 
-    def _expandPath(self, path: str, lpa: tuple, f_reject_true) -> str | None:
+    def _expandPath(self, path: str, lpa: tuple, f_reject_true, *, unescape=True) -> str | None:
         """Expands an ESCAPED! path to an absolute real path optionally trying to reject it on each step.
         Obeys _apply_cwd and _test_files requirements.
         Returns NOT-ESCAPED path."""
         try_reject = f_reject_true is not None
-        path = os.path.expanduser(unescapePath(path))
+
+        if unescape:
+            path = unescapePath(path)
+
         orig_arg = path
+        path = os.path.expanduser(path)
 
         if try_reject and f_reject_true(path):
             return None
@@ -1024,7 +1033,7 @@ class BaseParser:
         if abs_path:  # we shouldn't apply realpath to a non abs-path, as it might resolve wrongly
             orig_path = path
             path = os.path.realpath(path)
-            if orig_path != path and try_reject and f_reject_true(path):
+            if try_reject and orig_path != path and f_reject_true(path):
                 return None
 
             # only check existence when abspath is known, otherwise the result is UB
@@ -1172,7 +1181,7 @@ class BaseParser:
                 if path_part:
                     self._testPathExists(path_part, line_num, pid, args_str)
                     if "--output=" == m_pfx_arg.group(1):
-                        arg_output = self._processOutput(path_part, arg, lpa)
+                        arg_output = self._processOutput(arg_output, path_part, lpa)
                         if arg_output is None:
                             return  # PathFilter test failed
                 else:
@@ -1467,9 +1476,9 @@ def storeJson(
     with open(filename, "w") as f:
         f.write("[\n")
         if is_compile_commands:
-            n_written = _storeCompileCommands(f, commands, cwd, save_line_num, cmd_times)
+            n_written = _storeCompileCommands(f, commands, cwd, save_line_num, cmd_times)  # type: ignore
         else:
-            n_written = _storeOtherCommands(f, commands, cwd, save_line_num, cmd_times)
+            n_written = _storeOtherCommands(f, commands, cwd, save_line_num, cmd_times)  # type: ignore
         f.write("]\n")
     Con.print("Written", n_written, "commands to", filename)
 

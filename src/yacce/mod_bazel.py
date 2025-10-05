@@ -6,11 +6,14 @@ from rich.progress import Progress
 import shutil
 import signal
 import subprocess
+import shlex
 import sys
+from typing import Callable
 
 if "linux" == sys.platform:
     import pty
-    import shlex
+else:
+    print("WARNING: yacce might not work properly on a non Linux platform!")
 
 from .common import (
     addCommonCliArgs,
@@ -195,7 +198,7 @@ def _getArgs(
             not_found = 0
             break
 
-    first_rest += 1 + not_found
+    first_rest += 1 + not_found  # type: ignore
     if first_rest < len(unparsed_args):
         mode_args = unparsed_args[: first_rest - 1]
         unparsed_args = unparsed_args[first_rest:]
@@ -221,6 +224,11 @@ def _getArgs(
 
 
 class BazelParser(BaseParser):
+    # generated files such as 'bazel-out/k8-opt/bin/external/<repo>/..' are also externals!
+    # matches repo part in any external path spec. Not sure leading optional ./ is useful,
+    # haven't seen it, but leaving it just in case
+    r_any_external = re.compile(r"^(?:\.\/)?(?:bazel-[^\/]+\/[^\/]+\/bin\/)?external\/([^\/]+)\/")
+
     def __init__(self, Con: LoggingConsole, args: argparse.Namespace) -> None:
         Con.trace("Running base parser")
 
@@ -241,27 +249,137 @@ class BazelParser(BaseParser):
         Con.trace("Starting Bazel-specific processing...")
         self._update()
 
-    def _makeFullPath(
-        self, is_external: bool, subdir: str, path_ending: str, is_file: bool, *, warn=True
-    ) -> tuple[str, bool]:
+    def _internalExpandPath(self, subdir: str, path_ending: str, f_reject_true) -> str | None:
+        try_reject = f_reject_true is not None
+
+        fullpath = os.path.join(subdir, path_ending)
+        if try_reject and fullpath != path_ending and f_reject_true(fullpath):
+            self.Con.trace("_internalExpandPath: rejecting", fullpath)
+            return None
+
+        if not os.path.isabs(fullpath):
+            prev_path = fullpath
+            fullpath = os.path.join(self._cwd, fullpath)
+            if prev_path != fullpath:
+                if not os.path.isabs(fullpath):
+                    self.Con.failure(
+                        f"At this stage I was expecting to have an abs path for {subdir}/{path_ending}. "
+                        f"It resolved to {fullpath} which isn't absolute. Will try to proceed, but results might be wrong."
+                    )
+                if try_reject and f_reject_true(fullpath):
+                    self.Con.trace("_internalExpandPath: rejecting", fullpath)
+                    return None
+
+        prev_path = fullpath
+        fullpath = os.path.realpath(fullpath)
+        if try_reject and prev_path != fullpath and f_reject_true(fullpath):
+            self.Con.trace("_internalExpandPath: rejecting", fullpath)
+            return None
+        return fullpath
+
+    def _expandPath(  # type: ignore
+        self,
+        is_external: bool,
+        subdir: str,  # assuming subdir never needs unescaping
+        path_ending: str,
+        warn_not_exist_or_f: bool | Callable = True,
+        *,
+        f_reject_true=None,
+        unescape=True,
+        escape=True,
+    ) -> tuple[str | None, bool]:
+        """Method to expand a path to abs path, while optionally unescaping, apply filtering,
+        testing existence and reporting, and escaping the result."""
+        try_reject = f_reject_true is not None
+
+        if unescape:  # assuming subdir is always fine
+            path_ending = unescapePath(path_ending)
+
+        orig_path_ending = path_ending
+        path_ending = os.path.expanduser(path_ending)
+
+        ret_rejected = (None, False)  # what to return if rejecting the path
+        if try_reject and f_reject_true(path_ending):
+            self.Con.trace("_expandPath: rejecting ", path_ending)
+            return ret_rejected
+
+        if (fullpath := self._internalExpandPath(subdir, path_ending, f_reject_true)) is None:
+            return ret_rejected
+
         exists = False
-        fullpath = os.path.realpath(os.path.join(self._cwd, subdir, path_ending))
         if self._test_files:
-            exists = (is_file and os.path.isfile(fullpath)) or (
-                (not is_file) and os.path.exists(fullpath)
-            )
-            if is_external and not exists:
-                fullpath2 = os.path.realpath(os.path.join(self._cwd, "../..", subdir, path_ending))
-                exists = os.path.exists(fullpath2)
-                if exists:
-                    fullpath = fullpath2
-                else:
-                    if warn:
-                        self.Con.warning(
-                            f"External '{subdir}/{path_ending}' not found in both expected paths",
+            exists = os.path.exists(fullpath)  # there still might be symlinks, esp for dirs, so
+            # can't really discriminate between files and dirs and others here.
+            if not exists:
+                fullpath2 = None
+                if is_external:
+                    # trying 2 lvls higher
+                    if (
+                        fullpath2 := self._internalExpandPath(
+                            os.path.join("../..", subdir), path_ending, f_reject_true
+                        )
+                    ) is None:
+                        return ret_rejected
+
+                    exists = os.path.exists(fullpath2)
+                    if exists:
+                        fullpath = fullpath2
+
+                has_callable = callable(warn_not_exist_or_f)
+                if not exists and (has_callable or warn_not_exist_or_f):
+                    if fullpath2 is None:
+                        msg_tuple = (
+                            f"Path '{subdir}/{orig_path_ending}' not exist in expected location '{fullpath}'",
+                        )
+                    else:
+                        assert is_external
+                        msg_tuple = (
+                            f"External '{subdir}/{orig_path_ending}' not found in both expected locations",
                             (fullpath, fullpath2),
                         )
-        return fullpath, exists
+                    self.Con.warning(*msg_tuple, warn_not_exist_or_f() if has_callable else "")
+
+        return escapePath(fullpath) if escape else fullpath, exists
+
+    def _processOutput(self, output: str, line_num: int, *, do_escaping=True) -> str | None:  # type: ignore
+        path, _ = self._expandPath(
+            bool(self.r_any_external.match(output)),
+            "",
+            output,
+            lambda: f"Log line #{line_num}",
+            f_reject_true=lambda p: self._discard_outputs.matches(p),
+            unescape=do_escaping,
+            escape=do_escaping,
+        )
+        if path is None:  # discarded
+            self.Con.trace(
+                "Line '",
+                line_num,
+                " uses output ",
+                output,
+                " which makes the call ignored due to '--discard_outputs'",
+            )
+        return path
+
+    def _expandCompiler(self, path, line_num: int) -> str | None:
+        path = unescapePath(path)
+        basename = os.path.basename(path)
+
+        path, _ = self._expandPath(
+            bool(self.r_any_external.match(path)),
+            "",
+            path,
+            lambda: "Compiler not found!",
+            f_reject_true=lambda p: not self._isCompiler(p, basename),
+            unescape=False,
+        )
+        if not path:
+            return None
+
+        if self._test_files and not self._enable_compiler_scripts and self._isCompilerScript(path):
+            return None
+
+        return path
 
     def _update(self) -> None:
         ext_paths: dict[str, str] = {}  # external canonical_name -> realpath
@@ -276,31 +394,23 @@ class BazelParser(BaseParser):
         notfound_inc: set[str] = set()
 
         r_external = re.compile(r"^(?:\.\/)?external\/")
-        # generated files such as 'bazel-out/k8-opt/bin/external/<repo>/..' are also externals!
-        # matches repo part in any external path spec. Not sure leading optional ./ is useful,
-        # haven't seen it, but leaving it just in case
-        r_any_external = re.compile(
-            r"^(?:\.\/)?(?:bazel-[^\/]+\/[^\/]+\/bin\/)?external\/([^\/]+)\/"
-        )
         # matches a whole external/... part in bazel-../../external/.. path spec
         r_bazel_external = re.compile(r"^(?:\.\/)?bazel-[^\/]+\/[^\/]+\/bin\/(external\/.+)$")
 
         def _fixDirPath(orig_path: str, argidx: int, args: list[str] | None) -> str:
+            """Expands a directory path handling bazel's quirks related to specifying about the
+            same dir path under a different internal path. Returns an escaped path"""
             nonlocal extinc_paths, notfound_inc
-            m_ext = r_any_external.match(orig_path)
+            m_ext = self.r_any_external.match(orig_path)
             if m_ext:
                 r = m_ext.group(1)
                 if r not in extinc_paths:
-                    repo_path, exists = self._makeFullPath(True, "external", r, False)
-                    if self._test_files and not exists:
-                        self.Con.warning(
-                            f"External include repo '{r}' not found at expected path '{repo_path}'"
-                        )
+                    repo_path, _ = self._expandPath(True, "external", r, escape=False)
+                    assert repo_path is not None  # since no rejector func was supplied
                     extinc_paths[r] = repo_path
 
-            path, exists = self._makeFullPath(
-                bool(r_external.match(orig_path)), "", unescapePath(orig_path), False, warn=False
-            )
+            path, exists = self._expandPath(bool(r_external.match(orig_path)), "", orig_path, False)
+            assert path is not None
             if self._test_files and not exists:
                 err = True
                 if args is not None:
@@ -318,7 +428,7 @@ class BazelParser(BaseParser):
                                 break
                 if err:
                     notfound_inc.add(orig_path)
-            return escapePath(path)
+            return path
 
         with Progress(console=self.Con) as progress:  # transient=True,
             task = progress.add_task(
@@ -329,61 +439,135 @@ class BazelParser(BaseParser):
                 cctime = self.compile_cmd_time[ccidx]
                 args, output, sources, line_num = cc
 
+                assert bool(sources)  # expect it be not empty here
+                is_externals = [False] * len(sources)
+                repo = None
+                ext_repos = set()  # for sanity check
+
                 # processing sources
                 for src_idx in range(len(sources)):
                     src = sources[src_idx]
                     # deciding if this is external
-                    m_external = r_any_external.match(src)
+                    m_external = self.r_any_external.match(src)
+                    is_externals[src_idx] = bool(m_external)
                     if m_external:
                         repo = m_external.group(1)
+                        ext_repos.add(repo)
                         if repo not in ext_paths:
-                            repo_path, exists = self._makeFullPath(True, "external", repo, False)
-                            if self._test_files and not exists:
-                                self.Con.warning(
-                                    f"External repo '{repo}' referenced by source file {src} in log line#{line_num} not found at expected path '{repo_path}'"
-                                )
+                            repo_path, _ = self._expandPath(
+                                True,
+                                "external",
+                                repo,
+                                lambda: f"External repo '{repo}' referenced by source file {src} in log line#{line_num} not found.",
+                                escape=False,
+                            )
+                            assert repo_path is not None
                             ext_paths[repo] = repo_path
                     else:
                         repo = None
 
                     # checking and updating the source path
-                    path, exists = self._makeFullPath(
-                        bool(r_external.match(src)), "", unescapePath(src), True
+                    path, _ = self._expandPath(
+                        bool(self.r_any_external.match(src)),
+                        "",
+                        src,
+                        lambda: f"Log line #{line_num}.",
+                        f_reject_true=lambda p: self._discard_sources.matches(p),
+                        unescape=False,
+                        escape=False,
                     )
-                    if self._test_files and not exists:
-                        self.Con.warning(
-                            f"Source file '{path}' referenced as '{src}' in log line#{line_num} not found!"
+                    if path is None:  # discarded
+                        self.Con.trace(
+                            "Line '",
+                            line_num,
+                            " uses source ",
+                            src,
+                            " which makes the call ignored due to '--discard_sources'",
                         )
-                    sources[src_idx] = path # by convention, storeJson() does escapePath()
+                        sources = None
+                        break
 
-                # no need to check and update the output file
+                    sources[src_idx] = path  # by convention, storeJson() does escapePath()
 
-                # new_args = []
+                if not sources:  # if discarded due to --discard_sources
+                    continue
+
+                # checking/rejecting by output
+                if output:
+                    output = self._processOutput(output, line_num, do_escaping=False)
+                    if not output:
+                        continue
+
+                # checking compiler resolution
+                args[0] = self._expandCompiler(args[0], line_num)
+                if args[0] is None:  # discarded by blacklisted compiler
+                    continue
+
                 next_is_path = False
+                next_is_output = False
                 for argidx, arg in enumerate(args):
                     # resolving symlinks to reduce dependency on bazel's internal workspace structure
                     if next_is_path:
                         next_is_path = False
-                        #TODO special handling for output is needed here too
-                        args[argidx] = _fixDirPath(arg, argidx, args)
+                        if next_is_output:
+                            next_is_output = False
+                            arg = self._processOutput(arg, line_num)
+                            if arg is None:
+                                next_is_output = None
+                                break  # PathFilter test failed
+                            args[argidx] = arg
+                        else:
+                            args[argidx] = _fixDirPath(arg, argidx, args)
                     elif arg in self.kArgIsPath and (
                         arg not in self.kCheckArgForSysrootSpec
                         or not arg.startswith(self.kSysrootSpec)
                     ):
                         next_is_path = True
+                        if arg in self.kOutputArgs:
+                            next_is_output = True
                     elif m_pfx_arg := self.r_pfx_arg_is_path.match(arg):
                         path_part = arg[m_pfx_arg.end() :].lstrip()
                         if path_part:
-                            #TODO special handling for output is needed here too
-                            args[argidx] = m_pfx_arg.group() + _fixDirPath(path_part, argidx, None)
-                    # new_args.append(arg)
+                            if "--output=" == m_pfx_arg.group(1):
+                                path_part = self._processOutput(path_part, line_num)
+                                if path_part is None:
+                                    next_is_output = None
+                                    break  # PathFilter test failed
+                            else:
+                                path_part = _fixDirPath(path_part, argidx, None)
 
-                # new_cc = CompileCommand(new_args, output, source, line_num)
+                            args[argidx] = m_pfx_arg.group() + path_part
+
+                if next_is_output is None:  # entry is discarded due to --discard_outputs
+                    continue
+
                 new_cc = CompileCommand(args, output, sources, line_num)
-                if m_external:
+                if all(is_externals):
+                    assert bool(ext_repos)
+                    if len(ext_repos) > 1:
+                        # this should never happen, but a sanity check is never redundant
+                        self.Con.error(
+                            "External sources",
+                            sources,
+                            "belong to different repos",
+                            sorted(ext_repos),
+                            " in line ",
+                            line_num,
+                        )
+                    assert isinstance(repo, str)
                     ext_ccs.setdefault(repo, []).append(new_cc)
                     ext_cctimes.setdefault(repo, []).append(cctime)
                 else:
+                    if any(is_externals):
+                        # this should never happen, but a sanity check is never redundant
+                        self.Con.error(
+                            "External/internal sources",
+                            sources,
+                            "are mixed in line ",
+                            line_num,
+                            ". Externals mask is",
+                            is_externals,
+                        )
                     new_ccs.append(new_cc)
                     new_ccs_time.append(cctime)
                 progress.advance(task)
@@ -432,7 +616,7 @@ class BazelParser(BaseParser):
 
         # TODO other commands!
 
-    def storeJsons(self, dest_dir: str, external: str, save_duration: bool, save_line_num: bool):
+    def storeJsons(self, dest_dir: str, external: str, save_duration: bool, save_line_num: bool):  # type: ignore
         # saving other_commands no matter what if requested
         if self._do_other:
             storeJson(
@@ -788,7 +972,7 @@ class BazelWrap:
             self.Con.debug(f"Bazel server PID is {pid}")
             return pid
         except ValueError:
-            raise YacceException(f"Non-integer Bazel server PID '{pid_str}' was returned")
+            raise YacceException(f"Non-integer Bazel server PID '{pid_str}' was returned")  # type: ignore
         except Exception as e:
             raise YacceException(f"Failed to query Bazel server PID: {e}")
 
@@ -862,7 +1046,7 @@ class BazelWrap:
                     cwd = os.getcwd()
                     os.chdir(build_cwd)
                     try:
-                        retcode = pty.spawn([build_shell, "-c", build_system_str])
+                        retcode = pty.spawn([build_shell, "-c", build_system_str])  # type: ignore
                     except KeyboardInterrupt:
                         self.Con.yacce_begin()
                         shown_begin = True
@@ -963,7 +1147,6 @@ def mode_bazel(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: lis
 
     p = BazelParser(Con, args)
 
-    # TODO proper handling of args.external
     dest_dir = (
         args.dest_dir
         if hasattr(args, "dest_dir") and args.dest_dir
