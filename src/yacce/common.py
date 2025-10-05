@@ -996,7 +996,7 @@ class BaseParser:
         path = unescapePath(path)
         basename = os.path.basename(path)
 
-        path = self._expandPath(
+        path = self._expandPathBase(
             path, lpa, lambda p: not self._isCompiler(p, basename), unescape=False
         )
         if not path:
@@ -1007,7 +1007,7 @@ class BaseParser:
 
         return False
 
-    def _expandPath(self, path: str, lpa: tuple, f_reject_true, *, unescape=True) -> str | None:
+    def _expandPathBase(self, path: str, lpa: tuple, f_reject_true, *, unescape=True) -> str | None:
         """Expands an ESCAPED! path to an absolute real path optionally trying to reject it on each step.
         Obeys _apply_cwd and _test_files requirements.
         Returns NOT-ESCAPED path."""
@@ -1055,8 +1055,8 @@ class BaseParser:
                 f"Full command args are: {args_str}"
             )
 
-    def _processOutput(self, old_output: str | None, path: str, lpa: tuple) -> str | None:
-        exp_path = self._expandPath(path, lpa, lambda p: self._discard_outputs.matches(p))
+    def _processOutputBase(self, old_output: str | None, path: str, lpa: tuple) -> str | None:
+        exp_path = self._expandPathBase(path, lpa, lambda p: self._discard_outputs.matches(p))
         if exp_path is None:
             self.Con.trace(
                 "Line '",
@@ -1146,7 +1146,7 @@ class BaseParser:
                 self._testPathExists(arg, line_num, pid, args_str)
                 if next_is_output:
                     next_is_output = False
-                    arg_output = self._processOutput(arg_output, arg, lpa)
+                    arg_output = self._processOutputBase(arg_output, arg, lpa)
                     if arg_output is None:
                         return  # PathFilter test failed
                 # else: # maybe it makes sense to pass these through _expandPath(), but not sure
@@ -1181,7 +1181,7 @@ class BaseParser:
                 if path_part:
                     self._testPathExists(path_part, line_num, pid, args_str)
                     if "--output=" == m_pfx_arg.group(1):
-                        arg_output = self._processOutput(arg_output, path_part, lpa)
+                        arg_output = self._processOutputBase(arg_output, path_part, lpa)
                         if arg_output is None:
                             return  # PathFilter test failed
                 else:
@@ -1196,7 +1196,7 @@ class BaseParser:
                 and idx > 0  # idx==0 is always an executable
                 and args[idx - 1] not in self.kArgIsNotSource
             ):
-                path = self._expandPath(arg, lpa, lambda p: self._discard_sources.matches(p))
+                path = self._expandPathBase(arg, lpa, lambda p: self._discard_sources.matches(p))
                 if path is None:
                     self.Con.trace(
                         "Line '",
@@ -1413,7 +1413,7 @@ class BaseParser:
             self._seen_other[arg_output] = (arg_str, line_num)
         return False
 
-    def storeJsons(
+    def storeJsonsBase(
         self, dest_dir: str, save_duration: bool, save_line_num: bool, sfx: str = ""
     ) -> None:
         if not os.path.isdir(dest_dir):

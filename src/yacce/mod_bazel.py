@@ -277,7 +277,7 @@ class BazelParser(BaseParser):
             return None
         return fullpath
 
-    def _expandPath(  # type: ignore
+    def _expandPath(
         self,
         is_external: bool,
         subdir: str,  # assuming subdir never needs unescaping
@@ -341,7 +341,7 @@ class BazelParser(BaseParser):
 
         return escapePath(fullpath) if escape else fullpath, exists
 
-    def _processOutput(self, output: str, line_num: int, *, do_escaping=True) -> str | None:  # type: ignore
+    def _processOutput(self, output: str, line_num: int, *, do_escaping=True) -> str | None:
         path, _ = self._expandPath(
             bool(self.r_any_external.match(output)),
             "",
@@ -616,7 +616,7 @@ class BazelParser(BaseParser):
 
         # TODO other commands!
 
-    def storeJsons(self, dest_dir: str, external: str, save_duration: bool, save_line_num: bool):  # type: ignore
+    def storeJsons(self, dest_dir: str, external: str, save_duration: bool, save_line_num: bool):
         # saving other_commands no matter what if requested
         if self._do_other:
             storeJson(

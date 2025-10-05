@@ -83,5 +83,5 @@ def mode_from_log(Con: LoggingConsole, args: argparse.Namespace, unparsed_args: 
 
     p = BaseParser(Con, args)
 
-    p.storeJsons(args.dest_dir, args.save_duration, args.save_line_num)    
+    p.storeJsonsBase(args.dest_dir, args.save_duration, args.save_line_num)    
     return 0
