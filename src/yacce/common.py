@@ -7,7 +7,7 @@ import os
 import re
 import rich.console
 import rich.progress
-import textwrap
+# import textwrap
 
 
 class YacceException(RuntimeError):
@@ -101,12 +101,82 @@ class LoggingConsole(rich.console.Console):
         super().print("[bold bright_blue]<<<<<<<< YACCE ====[/bold bright_blue]")
 
 
+class PathFilter:
+    kHelp = (
+        "PathFilter specification:\n"
+        "-------------------------\n"
+        "Filters are tested before and after applying working directory to a path (if the path tested isn't an abs "
+        "path), and after expanding an abs path to a realpath(). Recognizable filter specifications are:\n"
+        "- exact match: filter not starting or ending on a plus '+' sign\n"
+        "- match prefix: filter ending with a plus '+' sign. A path starting with the string "
+        "before the plus sign matches the filter.\n"
+        "- match suffix: filter beginning with a plus '+' sign. A path ending with "
+        "a substring that follows the plus sign matches the filter.\n"
+        "- substring match: filter beginning with and ending with a plus '+' sign matches as a substring.\n"
+    )
+
+    def __init__(self, filters: list[str] | None):
+        self._exact: list[str] = []
+        self._pfx: tuple[str] = tuple()
+        self._sfx: tuple[str] = tuple()
+        self._substr: list[str] = []
+        self._enabled = False
+
+        if filters is None:
+            return
+        assert all(isinstance(s, str) for s in filters)
+        filters = [f for f in filters if bool(f)]
+        if not filters:
+            return
+
+        pfx = []
+        sfx = []
+
+        for f in filters:
+            starts = f.startswith("+")
+            ends = f.endswith("+")
+
+            if starts and ends:
+                if len(f) > 2:
+                    self._substr.append(f[1:-1])
+            elif starts:
+                if len(f) > 1:
+                    sfx.append(f[1:])
+            elif ends:
+                if len(f) > 1:
+                    pfx.append(f[:-1])
+            else:
+                self._exact.append(f)
+
+        self._pfx = tuple(pfx)
+        self._sfx = tuple(sfx)
+
+        self._enabled = any((bool(pfx), bool(sfx), bool(self._substr), bool(self._exact)))
+
+    def matches(self, path: str) -> bool:
+        if not self._enabled:
+            return False
+
+        if any(f in path for f in self._substr):
+            return True
+
+        if path.startswith(self._pfx) or path.endswith(self._sfx):
+            return True
+
+        if any(path == f for f in self._exact):
+            return True
+
+        return False
+
+
 kMainDescription = (
     "Yacce extracts compile_commands.json and build system insights from a build system "
     "by supervising the local compilation process with strace.\n"
     "Primarily supports Bazel (other build systems might be added later).\n"
     "--> Homepage: https://github.com/Arech/yacce"
 )
+
+kCommonEpilog = PathFilter.kHelp
 
 
 # WARNING: argparse doesn't guarantee its private API stability. WTH?!
@@ -158,7 +228,8 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
 
     parser.add_argument(
         "--ignore-not-found",
-        help="If set, will not test if files to be added to .json exists.\n",
+        help="If the flag is set, yacce will not test if files to be added to .json exists, and "
+        "will not attempt to test if an invoked compiler is a script wrapper.\n",
         action=argparse.BooleanOptionalAction,
         default=False,
     )
@@ -194,28 +265,36 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         default=False,
     )
 
+    kSeePathFilter = "See a 'PathFilter specification' section below for details.\n"
+
     parser.add_argument(
-        "--discard_outputs_with_pfx",
+        "--discard_outputs",
         help="A build system can compile some dummy source files only to gather information about "
         "compiler capabilities. Presence of these files in the compile_commands.json aren't usually helpful. "
         "Typically, such files are placed into /tmp or /dev/null, but other variants are possible.\n"
-        "This setting allows to fully customize which prefixes of a compiler's output file should "
-        "lead to ignoring the compilation call.\n" + kEmptyDisables + " " + kAcceptSequence + "\n"
+        "This setting lets you customize finding which compiler output files should "
+        "lead to ignoring the whole compilation call.\n"
+        + kSeePathFilter
+        + kEmptyDisables
+        + " "
+        + kAcceptSequence
+        + "\n"
         "Default: %(default)s. ",
-        metavar="path/prefix",
+        metavar="PathFilter",
         nargs="*",
-        default=["/dev/null", "/tmp/"],
+        default=["/dev/null", "/tmp/+", "+/.cache/ccache/tmp/+"],
     )
 
     parser.add_argument(
-        "--discard_sources_with_pfx",
-        help="Similar to --discard_outputs_with_pfx, but controls which prefixes of source files "
+        "--discard_sources",
+        help="Similar to --discard_outputs, but controls which source file path patterns "
         "should lead to ignoring the compiler call.\n"
+        + kSeePathFilter
         + kEmptyDisables
         + " "
         + kAcceptSequence
         + "\nDefault: %(default)s.",
-        metavar="path/prefix",
+        metavar="PathFilter",
         nargs="*",
         default=[""],
     )
@@ -285,7 +364,7 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         nargs="*",
     )
 
-    parser.add_argument(  # TODO IMPLEMENT
+    parser.add_argument(
         "--not_compiler",
         help="You can prevent a certain absolute path, a basename, a path suffix, or a path prefix "
         "(prepend it with a plus '+' symbol) from being treated as a compiler by using "
@@ -294,9 +373,9 @@ def addCommonCliArgs(parser: argparse.ArgumentParser, addendums: dict = {}):
         nargs="*",
     )
 
-    parser.add_argument(  # TODO IMPLEMENT
+    parser.add_argument(
         "--enable_compiler_scripts",
-        help="By default, yacce doesn't treat a script (classified by a shebang #! in the first 2 "
+        help="By default, yacce doesn't treat a script (classified by testing for shebang '#!' sequence in the first 2 "
         "bytes of the file) invocation as a compiler invocation and ignores it. Set this option "
         "when this behavior is unwanted.\n",
         action=argparse.BooleanOptionalAction,
@@ -395,11 +474,12 @@ def _makeCompilersSet(custom_compilers: list[str] | None) -> CompilersTuple:
 # line_num:int is the number (1 based index) of line in the log that spawned the process
 # is_other:bool is the command is other command
 # cmd_idx:int is the index of command in a corresponding list
-ProcessProps = namedtuple(
-    "ProcessProps", ("start_ts_us", "line_num", "is_other", "cmd_idx", "n_sources")
-)
-# args:list[str], output:str|None, source:str, line_num:int
-CompileCommand = namedtuple("CompileCommand", ("args", "output", "source", "line_num"))
+ProcessProps = namedtuple("ProcessProps", ("start_ts_us", "line_num", "is_other", "cmd_idx"))
+# args:list[str], output:str|None, sources:list[str], line_num:int
+# note that 'sources' are removed from args and should be put there during save to a file phase
+# Also note that sources and output are unescaped and must be escaped upon writing to JSON
+# All args should always be escaped
+CompileCommand = namedtuple("CompileCommand", ("args", "output", "sources", "line_num"))
 OtherCommand = namedtuple("OtherCommand", ("args", "output", "line_num"))
 
 
@@ -595,7 +675,9 @@ class BaseParser:
             return "-" + s[1:]
         return s
 
-    def __init__(self, Con: LoggingConsole, args: argparse.Namespace) -> None:
+    def __init__(
+        self, Con: LoggingConsole, args: argparse.Namespace, *, apply_cwd: bool = True
+    ) -> None:
         self.Con = Con
 
         setattr(args, "compiler", _makeCompilersSet(args.compiler))
@@ -606,14 +688,21 @@ class BaseParser:
         self._not_compilers: CompilersTuple = args.not_compiler
 
         self._do_other = args.other_commands
-        self._cwd = os.path.realpath(args.cwd)
         self._test_files = not args.ignore_not_found
-        self._discard_outputs_with_pfx = tuple(
-            s for s in args.discard_outputs_with_pfx if len(s) > 0
-        )
-        self._discard_sources_with_pfx = tuple(
-            s for s in args.discard_sources_with_pfx if len(s) > 0
-        )
+
+        # ATTENTION! While BaseParser could use cwd, if apply_cwd isn't set, it should NOT modify CC
+        # arguments using cwd, since this might break a derived parser assumptions.
+        # In general, BaseParser is meant to only convert an strace output into a structured form.
+        # It should NOT rely on any assumptions about build system functioning. cwd is actually one
+        # of them, hence apply_cwd is needed when a derived parser has its own logic of cwd application
+        self._cwd = os.path.realpath(os.path.expanduser(args.cwd))
+        setattr(args, "cwd", self._cwd)
+        self._apply_cwd = apply_cwd
+        # note that if _test_files / !ignore_not_found is set, while _apply_cwd isn't, yacce can't actually test most
+        # files, since cwd expansion is forbidden.
+
+        self._discard_outputs = PathFilter(args.discard_outputs)
+        self._discard_sources = PathFilter(args.discard_sources)
         self._discard_args_with_pfx = tuple(
             BaseParser._leadingPlusToDash(s) for s in args.discard_args_with_pfx if len(s) > 0
         )
@@ -624,7 +713,7 @@ class BaseParser:
             Con.warning(
                 "Compilation directory '",
                 self._cwd,
-                "' doesn't exist. If you used --cwd option, check its correctness. "
+                "' doesn't exist. If you used '--cwd' option, check its correctness. "
                 "Resulting json will likely be invalid.",
             )
 
@@ -706,6 +795,7 @@ class BaseParser:
                 if unfinished_line is not None:
                     prev_line = unfinished_line
                     unfinished_line = None
+                    assert isinstance(unfinished_args, tuple) and len(unfinished_args) == 4
                     if line.startswith(")"):
                         self._handleExec(*unfinished_args, prev_line + line)
                         continue
@@ -755,6 +845,7 @@ class BaseParser:
                 self.Con.error(
                     "Previous line is marked as unfinished, but this was the last line. Trying to handle it"
                 )
+                assert isinstance(unfinished_args, tuple) and len(unfinished_args) == 4
                 self._handleExec(*unfinished_args, unfinished_line)
 
         # finishing unfinished processes
@@ -813,7 +904,7 @@ class BaseParser:
 
     def _handleExit(self, pid: int, ts: float, exit_code: str | None, line_num: int) -> None:
         # negative exit code means the process termination was not found in the log
-        (start_ts, start_line_num, is_other, cmd_idx, n_sources) = self._running_pids[pid]
+        (start_ts, start_line_num, is_other, cmd_idx) = self._running_pids[pid]
 
         is_exit_logged = line_num > 0
         if is_exit_logged:  # <=0 line_idx is used when we didn't find the process exit in the log
@@ -838,7 +929,6 @@ class BaseParser:
                     f"{ts:.6f} which is before it started at "
                     f"{start_ts:.6f}. Continuing, but the log file might be malformed."
                 )
-                # todo: save this to errors
         else:
             self.Con.warning(
                 f"pid {pid} (started at line {start_line_num}) didn't log its exit. "
@@ -849,18 +939,9 @@ class BaseParser:
         if is_other:
             self.other_cmd_time[cmd_idx] = duration
         else:
-            self.compile_cmd_time[cmd_idx : cmd_idx + n_sources] = [duration] * n_sources
+            self.compile_cmd_time[cmd_idx] = duration
 
         del self._running_pids[pid]
-
-    def _testPathExists(self, arg: str, line_num: int, pid: int, args_str: str) -> None:
-        if self._test_files and not unescapedPathExists(self._cwd, arg):
-            self.Con.warning(
-                f"Line {line_num}: pid {pid} uses argument '{arg}' "
-                "which doesn't exist. This might mean the build system is misconfigured "
-                "or the log file is incomplete and hence so is the resulting .json. "
-                f"Full command args are: {args_str}"
-            )
 
     def _isCompilerScript(self, compiler_path: str) -> bool:
         if compiler_path in self._compiler_is_script:
@@ -911,6 +992,88 @@ class BaseParser:
             return False  # not a compiler we care about
         return True
 
+    def _ignoreExecutable(self, path, lpa: tuple) -> bool:
+        path = unescapePath(path)
+        basename = os.path.basename(path)
+
+        path = self._expandPathBase(
+            path, lpa, lambda p: not self._isCompiler(p, basename), unescape=False
+        )
+        if not path:
+            return True
+
+        if self._test_files and not self._enable_compiler_scripts and self._isCompilerScript(path):
+            return True
+
+        return False
+
+    def _expandPathBase(self, path: str, lpa: tuple, f_reject_true, *, unescape=True) -> str | None:
+        """Expands an ESCAPED! path to an absolute real path optionally trying to reject it on each step.
+        Obeys _apply_cwd and _test_files requirements.
+        Returns NOT-ESCAPED path."""
+        try_reject = f_reject_true is not None
+
+        if unescape:
+            path = unescapePath(path)
+
+        orig_arg = path
+        path = os.path.expanduser(path)
+
+        if try_reject and f_reject_true(path):
+            return None
+
+        abs_path = os.path.isabs(path)  # we shouldn't apply cwd if _apply_cwd isn't set
+
+        if not abs_path and self._apply_cwd:  # now how it's seen from the cwd
+            path = os.path.join(self._cwd, path)
+            abs_path = True
+            if try_reject and f_reject_true(path):
+                return None
+
+        if abs_path:  # we shouldn't apply realpath to a non abs-path, as it might resolve wrongly
+            orig_path = path
+            path = os.path.realpath(path)
+            if try_reject and orig_path != path and f_reject_true(path):
+                return None
+
+            # only check existence when abspath is known, otherwise the result is UB
+            if self._test_files and not os.path.exists(path):
+                self.Con.warning(
+                    f"Line {lpa[0]}: pid {lpa[1]} uses argument '{orig_arg}' "
+                    "which doesn't exist. This might mean the build system is misconfigured "
+                    "or the log file is incomplete and hence so is the resulting .json. "
+                    + ("Full command args are: " + lpa[2] if len(lpa) > 2 else "")
+                )
+        return path
+
+    def _testPathExists(self, arg: str, line_num: int, pid: int, args_str: str) -> None:
+        if self._test_files and not unescapedPathExists(self._cwd, arg):
+            self.Con.warning(
+                f"Line {line_num}: pid {pid} uses argument '{arg}' "
+                "which doesn't exist. This might mean the build system is misconfigured "
+                "or the log file is incomplete and hence so is the resulting .json. "
+                f"Full command args are: {args_str}"
+            )
+
+    def _processOutputBase(self, old_output: str | None, path: str, lpa: tuple) -> str | None:
+        exp_path = self._expandPathBase(path, lpa, lambda p: self._discard_outputs.matches(p))
+        if exp_path is None:
+            self.Con.trace(
+                "Line '",
+                lpa[0],
+                " pid ",
+                lpa[1],
+                ": is ignored due to '--discard_outputs' for ",
+                path,
+            )
+        elif old_output is not None:
+            self.Con.warning(
+                f"Line {lpa[0]}: pid {lpa[1]} uses multiple output options. "
+                "This is unusual, taking the last one. "
+                + ("Full command args are: " + lpa[2] if len(lpa) > 2 else "")
+            )
+        return exp_path
+
     def _handleExec(self, call: str, pid: int, ts: float, line_num: int, line: str) -> None:
         assert pid not in self._running_pids  # should be checked by the caller
         """assert call in ("execve", "execveat"), (
@@ -934,24 +1097,8 @@ class BaseParser:
             "The log file is malformed or _r_in_quotes regexp is incorrect"
         )
 
-        # unescaping quotes and other symbols.
-        compiler_path = unescapePath(match_filepath.group(2))
-        compiler_basename = os.path.basename(compiler_path)
-        # first checking as it's seen in strace log
-        if not self._isCompiler(compiler_path, compiler_basename):
-            return
-        if not os.path.isabs(compiler_path):
-            # now how it's seen from the cwd
-            compiler_path = os.path.join(self._cwd, compiler_path)
-            if not self._isCompiler(compiler_path, compiler_basename):
-                return
-
-        orig_path = compiler_path
-        compiler_path = os.path.realpath(compiler_path)
-        if orig_path != compiler_path and not self._isCompiler(compiler_path, compiler_basename):
-            return
-
-        if not self._enable_compiler_scripts and self._isCompilerScript(compiler_path):
+        exec_path = match_filepath.group(2)
+        if self._ignoreExecutable(exec_path, (line_num, pid)):
             return
 
         # finding execv() args in the rest of the line
@@ -969,13 +1116,13 @@ class BaseParser:
         )
 
         args_str = match_args.group()
+        lpa = (line_num, pid, args_str)
 
         # Extracting args from the args_str. We can't simply split by ", " because there might be
         # such sequence in file names. So we use the same rInQuotes regexp to extract them one by one.
         # In a sense, it's a duplication of application of the same regexp as above, but we must
         # scope the search to the inside of the braces only
-        args = re.findall(self._r_in_quotes, args_str)
-        args = [inner for _, inner in args]
+        args = [inner for _, inner in re.findall(self._r_in_quotes, args_str)]
 
         if self._shouldIgnoreInvocation(args, line_num, pid, args_str):
             return
@@ -999,12 +1146,10 @@ class BaseParser:
                 self._testPathExists(arg, line_num, pid, args_str)
                 if next_is_output:
                     next_is_output = False
-                    if arg_output is not None:
-                        self.Con.warning(
-                            f"Line {line_num}: pid {pid} uses multiple output options. "
-                            f"This is unusual, taking the last one. Full command args are: {args_str}"
-                        )
-                    arg_output = arg  # it's already escaped
+                    arg_output = self._processOutputBase(arg_output, arg, lpa)
+                    if arg_output is None:
+                        return  # PathFilter test failed
+                # else: # maybe it makes sense to pass these through _expandPath(), but not sure
                 continue
             elif self._discard_args_with_pfx and arg.startswith(self._discard_args_with_pfx):
                 # argument blacklist is the first check
@@ -1036,12 +1181,9 @@ class BaseParser:
                 if path_part:
                     self._testPathExists(path_part, line_num, pid, args_str)
                     if "--output=" == m_pfx_arg.group(1):
-                        if arg_output is not None:
-                            self.Con.warning(
-                                f"Line {line_num}: pid {pid} uses multiple output options. "
-                                f"This is unusual, taking the last one. Full command args are: {args_str}"
-                            )
-                        arg_output = path_part  # it's already escaped
+                        arg_output = self._processOutputBase(arg_output, path_part, lpa)
+                        if arg_output is None:
+                            return  # PathFilter test failed
                 else:
                     self.Con.error(
                         f"Line {line_num}: pid {pid} uses '{arg}' argument without a path. "
@@ -1051,10 +1193,25 @@ class BaseParser:
                 self._unsupported_args.add(arg)
             elif (
                 arg.endswith(self.kExtOfSource)
-                and idx > 0
+                and idx > 0  # idx==0 is always an executable
                 and args[idx - 1] not in self.kArgIsNotSource
             ):
-                sources.append(arg)
+                path = self._expandPathBase(arg, lpa, lambda p: self._discard_sources.matches(p))
+                if path is None:
+                    self.Con.trace(
+                        "Line '",
+                        line_num,
+                        " pid ",
+                        pid,
+                        ": is ignored due to '--discard_sources' for ",
+                        arg,
+                    )
+                    return
+                sources.append(path)  # sources are unescaped by convention
+                # since there might be many sources, but a compile_commands entry should better be
+                # about a single source, we're removing all found sources from the args to
+                # individually append them later during saving to json
+                discard_arg_idx.append(idx)
 
         if discard_arg_idx:
             for i in reversed(discard_arg_idx):
@@ -1075,30 +1232,14 @@ class BaseParser:
                     f"Line {line_num} pid {pid}: output wasn't explicitly set for a call '{args_str}'."
                     "\nOutput based duplicate checks might yield false positives."
                 )
-        else:
-            if self._discard_outputs_with_pfx and arg_output.startswith(
-                self._discard_outputs_with_pfx
-            ):
-                self.Con.trace(
-                    f"Line {line_num} pid {pid}: call '{args_str}' is ignored due to args.discard_outputs_with_pfx"
-                )
-                return
 
         if n_sources > 1:
             self.Con.warning(
                 f"Line {line_num} pid {pid}: call '{args_str}' has {n_sources} sources"
             )
 
-        if self._discard_sources_with_pfx:
-            sources = [s for s in sources if not s.startswith(self._discard_sources_with_pfx)]
-            if not sources:
-                self.Con.trace(
-                    f"Line {line_num} pid {pid}: call '{args_str}' is ignored due to args.discard_sources_with_pfx"
-                )
-                return
-
         # Fixing the first argument in args to be the same as the one used in the execve() call.
-        args[0] = compiler_path
+        args[0] = exec_path  # escaped (wasn't unescaped)
 
         if is_other:
             if self._do_dupes_check:
@@ -1107,14 +1248,15 @@ class BaseParser:
             cmd_idx = len(self.other_cmd_time)
             self.other_cmd_time.append(0.0)
         else:
+            assert bool(sources)
             cmd_idx = len(self.compile_cmd_time)
-            for src in sources:
-                if self._do_dupes_check:
+            if self._do_dupes_check:
+                for src in sources:
                     self._checkSameCompile(args_str, line_num, arg_output, src)
-                self.compile_commands.append(CompileCommand(args, arg_output, src, line_num))
-                self.compile_cmd_time.append(0.0)
+            self.compile_commands.append(CompileCommand(args, arg_output, sources, line_num))
+            self.compile_cmd_time.append(0.0)
 
-        self._running_pids[pid] = ProcessProps(ts, line_num, is_other, cmd_idx, n_sources)
+        self._running_pids[pid] = ProcessProps(ts, line_num, is_other, cmd_idx)
 
     def _shouldIgnoreInvocation(
         self, args: list[str], line_num: int, pid: int, args_str: str
@@ -1157,14 +1299,14 @@ class BaseParser:
         for i in at_idxs:
             fname = toAbsPathUnescape(self._cwd, args[i][1:])
             if os.path.isfile(fname):
-                fsize = os.path.getsize(fname)
-                if fsize > 64 * 1024:  # randomly sufficient threshold
-                    self.Con.info(
-                        f"Line {line_num}: pid {pid} has @file argument#{i} '{args[i]}' that "
-                        "points to a file of size",
-                        fsize,
-                        ". That seems a bit too much, perhaps something is wrong?",
-                    )
+                # fsize = os.path.getsize(fname)
+                # if fsize > 128 * 1024:  # randomly sufficient threshold  ## probably not useful
+                #     self.Con.info(
+                #         f"Line {line_num}: pid {pid} has @file argument#{i} '{args[i]}' that "
+                #         "points to a file of size",
+                #         fsize,
+                #         ". That seems a bit too much, perhaps something is wrong?",
+                #     )
                 with open(fname, "r") as file:
                     file_content = file.read()
                 # self.Con.debug("@file", args[i], "  -->  ", file_content)
@@ -1198,7 +1340,7 @@ class BaseParser:
             else:
                 self.Con.error(
                     f"Line {line_num}: pid {pid} has @file argument#{i} '{args[i]}' that doesn't "
-                    "reference existing file. Processing might yield incomplete results."
+                    "reference an existing file. Processing might yield incomplete results."
                 )
                 # do nothing
         return args
@@ -1271,7 +1413,7 @@ class BaseParser:
             self._seen_other[arg_output] = (arg_str, line_num)
         return False
 
-    def storeJsons(
+    def storeJsonsBase(
         self, dest_dir: str, save_duration: bool, save_line_num: bool, sfx: str = ""
     ) -> None:
         if not os.path.isdir(dest_dir):
@@ -1329,44 +1471,78 @@ def storeJson(
     assert is_other or isinstance(e, CompileCommand)
     assert int(is_other) + int(is_compile_commands) == 1
 
-    cwd = cwd.replace('"', '\\"')
+    cwd = escapePath(cwd)
+    n_written = 0
     with open(filename, "w") as f:
         f.write("[\n")
-        for idx, cmd_tuple in enumerate(commands):
-            f.write(("," if idx > 0 else "") + "{\n")
+        if is_compile_commands:
+            n_written = _storeCompileCommands(f, commands, cwd, save_line_num, cmd_times)  # type: ignore
+        else:
+            n_written = _storeOtherCommands(f, commands, cwd, save_line_num, cmd_times)  # type: ignore
+        f.write("]\n")
+    Con.print("Written", n_written, "commands to", filename)
+
+
+def _storeCompileCommands(
+    f, commands: list[CompileCommand], cwd: str, save_line_num: bool, cmd_times: list[float] | None
+) -> int:
+    save_duration = bool(cmd_times)
+    n_written = 0
+    for idx, cmd_tuple in enumerate(commands):
+        args, arg_output, sources, line_num = cmd_tuple
+        for src in sources:
+            f.write(("," if n_written > 0 else "") + "{\n")
             f.write(f' "directory": "{cwd}",\n')
-            if is_other:
-                args, arg_output, line_num = cmd_tuple
-            else:
-                args, arg_output, arg_compile, line_num = cmd_tuple
-                f.write(f' "file": "{arg_compile}",\n')
+            esc_src = escapePath(src)
+            f.write(f' "file": "{esc_src}",\n')
 
             if save_line_num:
                 f.write(f' "line_num": {line_num},\n')
             if save_duration:
                 f.write(f' "duration_s": {cmd_times[idx]:.6f},\n')
             if arg_output is not None:
-                f.write(f' "output": "{arg_output}",\n')
+                f.write(f' "output": "{escapePath(arg_output)}",\n')
 
-            args_str = '", "'.join(args)
+            args_str = '", "'.join(args + [esc_src])
             f.write(f' "arguments": ["{args_str}"]\n')
             f.write("}\n")
+            n_written += 1
+    return n_written
 
-        f.write("]\n")
-    Con.print("Written", len(commands), "commands to", filename)
+
+def _storeOtherCommands(
+    f, commands: list[OtherCommand], cwd: str, save_line_num: bool, cmd_times: list[float] | None
+) -> int:
+    save_duration = bool(cmd_times)
+    for idx, cmd_tuple in enumerate(commands):
+        f.write(("," if idx > 0 else "") + "{\n")
+        f.write(f' "directory": "{cwd}",\n')
+        args, arg_output, line_num = cmd_tuple
+
+        if save_line_num:
+            f.write(f' "line_num": {line_num},\n')
+        if save_duration:
+            f.write(f' "duration_s": {cmd_times[idx]:.6f},\n')
+        if arg_output is not None:
+            f.write(f' "output": "{escapePath(arg_output)}",\n')
+
+        args_str = '", "'.join(args)
+        f.write(f' "arguments": ["{args_str}"]\n')
+        f.write("}\n")
+    return len(commands)
 
 
 def unescapePath(path: str) -> str:
     # not sure this is correct
-    return path.encode("latin1").decode("unicode_escape")
+    return path.replace('\\"', '"').encode("latin1").decode("unicode_escape")
 
 
 def escapePath(path: str) -> str:
-    return path.encode("unicode_escape").decode("latin1")
+    return path.encode("unicode_escape").decode("latin1").replace('"', '\\"')
 
 
 def toAbsPathUnescape(cwd: str, path: str) -> str:
-    path = unescapePath(path)
+    path = os.path.expanduser(unescapePath(path))
     if not os.path.isabs(path):
         path = os.path.join(cwd, path)
     return os.path.realpath(path)  # resolve symlinks so isfile() or isdir() works properly
