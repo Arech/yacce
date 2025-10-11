@@ -17,6 +17,8 @@ with `hedronvision/bazel-compile-commands-extractor` being the most well-known a
 Why bother?
 
 There are several reasons:
+- either they don't yield a `compile_commands.json` that let a LSP server (clangd, usually) to see all
+the relevant C++ symbols, i.e. don't work well, or
 - their usability is horrible, - extractors I've seen (I don't claim I saw all
 of them in existence!) requires one to make a certain nontrivial modification of the build system
 and specifically list there what targets and how exactly are going to be compiled just to spew the
@@ -27,10 +29,10 @@ damn compile_commands!
     extractor's code into the build system. Do this a few times a week, and you'll start to genuinely
     dislike Bazel (if you don't yet).
     - why it can't be made as simple as, for example, in CMake with its `-DCMAKE_EXPORT_COMPILE_COMMANDS=1` ?
-- completely orthogonal to usability there is an InfoSec consideration: what if I don't want to add
-a 3rd party, potentially compromisable dependency, into my project? I have no idea what it does
+- there is a completely orthogonal to usability and to correctness InfoSec consideration: what if I
+don't want to add a 3rd party, potentially compromisable dependency, into my project? I have no idea what it does
 internally there and what could it inject into my binaries under the hood. Why does an extractor
-have to be intrusive?
+just have to be intrusive?
 
 ## Benefits of yacce
 
@@ -712,3 +714,16 @@ follows the plus sign matches the filter.
 - substring match: filter beginning with and ending with a plus '+' sign matches as a
 substring.
 ```
+
+## Stability and Changelog
+
+Current version is considered a stable experimental release, which means it works perfectly well on the tested
+projects without known issues, but due to the facts described in "Limitations" section, might give
+unexpected results on other projects.
+
+Zero in the current major version signify a development status, which is expected to stabilize into
+version 1.0 soon. After that the project will fully follow the semantic versioning scheme.
+
+Depending on a feedback, the project or its individual components might get breaking changes, so
+you might want to use version pinning to prevent unexpected breakages if you're relying on it in
+automated scripts. See [CHANGELOG.md](https://github.com/Arech/yacce/blob/main/CHANGELOG.md) for details.
